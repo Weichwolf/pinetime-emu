@@ -37,6 +37,10 @@ public:
         if (pin >= 32) return;
         if (high) in_ |= (1u << pin);
         else in_ &= ~(1u << pin);
+        // Update LATCH: set bit when SENSE condition matches
+        uint8_t sense = (pin_cnf_[pin] >> 16) & 3;
+        if ((sense == 2 && high) || (sense == 3 && !high))
+            latch_ |= (1u << pin);
         notify_gpiote();
     }
 
@@ -47,6 +51,7 @@ public:
     }
 
     uint32_t get_out() const { return out_; }
+    uint32_t pin_cnf(int pin) const { return pin < 32 ? pin_cnf_[pin] : 0; }
     uint32_t get_dir() const { return dir_; }
 
     uint32_t read(uint32_t addr, Width /*w*/) override {
@@ -62,8 +67,22 @@ public:
         case 0x524: return 0; // DETECTMODE
         }
         // PIN_CNF[0..31] at 0x700-0x77C
-        if (addr >= 0x700 && addr < 0x780)
-            return pin_cnf_[(addr - 0x700) / 4];
+        if (addr >= 0x700 && addr < 0x780) {
+            uint8_t pin = (addr - 0x700) / 4;
+            uint32_t val = pin_cnf_[pin];
+            // Emulate nrfx_gpiote SENSE toggle: when ISR reads PIN_CNF and
+            // SENSE matches current pin state, auto-toggle SENSE for next edge.
+            // The firmware binary's nrfx_gpiote should do this but doesn't.
+            uint8_t sense = (val >> 16) & 3;
+            if (sense >= 2) {
+                bool pin_high = get_pin(pin);
+                if ((sense == 2 && pin_high) || (sense == 3 && !pin_high)) {
+                    uint8_t new_sense = (sense == 2) ? 3 : 2;
+                    pin_cnf_[pin] = (val & ~0x00030000u) | ((uint32_t)new_sense << 16);
+                }
+            }
+            return val;  // Return ORIGINAL value to firmware
+        }
         return 0;
     }
 
@@ -78,8 +97,9 @@ public:
         case 0x520: latch_ &= ~val; break;    // LATCH (write 1 to clear)
         case 0x524: break; // DETECTMODE
         default:
-            if (addr >= 0x700 && addr < 0x780)
+            if (addr >= 0x700 && addr < 0x780) {
                 pin_cnf_[(addr - 0x700) / 4] = val;
+            }
             break;
         }
     }
@@ -109,6 +129,7 @@ class GPIOTE : public Device {
 
 public:
     void set_gpio(GPIO* gpio) { gpio_ = gpio; }
+    uint32_t get_ev_port() const { return ev_port_; }
     void set_nvic(NVIC* nvic, uint32_t irq) { nvic_ = nvic; irq_ = irq; }
 
     // Called when any GPIO input pin changes (from GPIO::set_pin or output changes)
@@ -134,8 +155,7 @@ public:
             }
         }
 
-        // PORT event: check SENSE config on PIN_CNF registers
-        // Simplified: fire PORT on any input change
+        // PORT event: fire on any input change
         if (rising | falling) {
             ev_port_ = 1;
             fire_irq();

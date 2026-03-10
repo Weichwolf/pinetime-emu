@@ -20,6 +20,7 @@ class NVIC : public Device {
     uint16_t sys_pending_ = 0;
     bool sysresetreq_ = false;
     bool* irq_pending_ = nullptr;  // CPU's irq_pending flag
+    bool* event_reg_ = nullptr;    // CPU's WFE event register
 
     // SCB
     uint32_t vtor_ = 0;
@@ -44,7 +45,11 @@ class NVIC : public Device {
 public:
     void set_cpu_pc(const uint32_t* pc) { cpu_pc_ = pc; }
     void set_irq_pending_flag(bool* flag) { irq_pending_ = flag; }
-    void signal_irq() { if (irq_pending_) *irq_pending_ = true; }
+    void set_event_reg(bool* flag) { event_reg_ = flag; }
+    void signal_irq() {
+        if (irq_pending_) *irq_pending_ = true;
+        if (event_reg_) *event_reg_ = true;
+    }
 
     uint32_t get_vtor() const { return vtor_; }
     bool check_sysreset() {

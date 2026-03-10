@@ -123,10 +123,18 @@ Tests terminieren via BKPT. R0=0 = PASS, R0=N = Test N fehlgeschlagen.
 
 **CPU**: Thumb-2 Core + VFPv4-D16 FPU (single+double precision). IT-Blöcke, Exceptions, interrupt-driven scheduling. 10 Basistests bestehen.
 **Peripherals**: Alle nRF52-Peripherals implementiert: Radio, PPI, SAADC, TEMP, RNG, ECB, NVMC, SysTick, NVIC, SPIM, TWIM, Timers, RTCs, GPIO/GPIOTE, WDT, CLOCK/POWER.
-**PineTime**: ST7789 (SPI→Framebuffer→SDL2), CST816S (Touch→Maus), HRS3300, BMA4xx. Ext. SPI Flash 4MB.
+**PineTime**: ST7789 (SPI→Framebuffer→SDL2), CST816S Touch (WASD=Swipe, Maus=Tap, Space=Button), HRS3300, BMA4xx. Ext. SPI Flash 4MB.
 **Firmware**: `firmware/merged-internal.bin` — InfiniTime 1.14.1 + MCUBoot Bootloader.
 
 **InfiniTime Boot**: ✓ Erfolgreich. MCUBoot → InfiniTime Handoff, Display ON, Digital Watchface gerendert (8k/58k Pixel), FreeRTOS stabil (10s Laufzeit, Scheduler aktiv, Tasks laufen).
+
+**Touch/Gesture Input**: ✓ Funktioniert. WASD für Swipe-Gesten (W=Up, S=Down, A=Left, D=Right), Maus für Tap, Space für Button. Touch-IRQ-Kette: CST816S → GPIO Pin 28 (active low) → GPIOTE PORT Event → NVIC IRQ 6 → FreeRTOS Task Notification → Gesture Processing → Display Update.
+
+**Kritische Emulations-Fixes**:
+- GPIO PIN_CNF SENSE Auto-Toggle: nrfx_gpiote's PORT-Handler liest PIN_CNF SENSE aber toggled es nicht (Firmware-Bug oder Compiler-Optimierung). Emulator emuliert das Toggle als Side-Effect bei PIN_CNF Read (gpio.hpp). Ohne Toggle: kein Release-Event → Touch State Machine hängt → nur erster Gesture funktioniert.
+- CST816S Action Field: Register 0x03 Bits [7:6] korrekt setzen (0=Down, 1=Up). Nötig damit InfiniTime Touch-Releases erkennt.
+- WFI/WFE Wakeup trotz PRIMASK: Pending Interrupts wecken CPU aus WFI/WFE auch bei PRIMASK=1.
+- NVIC Event Register: Interrupts setzen event_reg für WFE-Wakeup.
 
 **Offen**:
 - Performance-Optimierung (aktuell ~1x Echtzeit)

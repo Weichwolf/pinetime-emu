@@ -46,9 +46,10 @@ public:
 private:
     void update_regs() {
         memset(regs_, 0, sizeof(regs_));
+        uint8_t action = touched_ ? 0 : 1;        // 0=Down, 1=Up, 2=Contact
         regs_[0x01] = gesture_;                    // GestureID
         regs_[0x02] = touched_ ? 1 : 0;           // FingerNum
-        regs_[0x03] = (touch_x_ >> 8) & 0x0F;     // XposH (event + X high)
+        regs_[0x03] = (action << 6) | ((touch_x_ >> 8) & 0x0F); // Event[7:6] + XposH[3:0]
         regs_[0x04] = touch_x_ & 0xFF;             // XposL
         regs_[0x05] = (touch_y_ >> 8) & 0x0F;     // YposH
         regs_[0x06] = touch_y_ & 0xFF;             // YposL

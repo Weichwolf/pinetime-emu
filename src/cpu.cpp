@@ -166,6 +166,7 @@ void CPU::exception_entry(uint32_t exception_num) {
         nvic_->set_active(exception_num - 16);
         nvic_->clear_pending(exception_num - 16);
     }
+
 }
 
 void CPU::exception_return(uint32_t exc_return) {
@@ -219,6 +220,20 @@ void CPU::exception_return(uint32_t exc_return) {
 
 void CPU::check_exceptions() {
     if (!nvic_) return;
+
+    // WFI/WFE wakeup: any pending+enabled interrupt wakes the CPU,
+    // even if masked by PRIMASK/BASEPRI. CPU resumes at next instruction
+    // (which typically clears PRIMASK), then interrupt is taken later.
+    if (wfi) {
+        bool wake = false;
+        for (int exc : {15, 14, 11})
+            wake |= nvic_->is_sys_pending(exc);
+        if (!wake) {
+            int irq = nvic_->get_pending_irq();
+            wake = (irq >= 0);
+        }
+        if (wake) wfi = false;
+    }
 
     // Determine current execution priority
     int exec_pri = 256; // Lowest priority (thread mode)
@@ -837,9 +852,12 @@ void CPU::exec_thumb16_misc(uint16_t inst) {
             switch ((inst >> 4) & 0xF) {
             case 0: break; // NOP
             case 1: break; // YIELD
-            case 2: break; // WFE
+            case 2: // WFE
+                if (event_reg) event_reg = false; // Event pending → clear and continue
+                else wfi = true;                  // No event → sleep
+                break;
             case 3: wfi = true; break; // WFI
-            case 4: break; // SEV
+            case 4: event_reg = true; break; // SEV
             }
         } else {
             // IT instruction — set IT state
@@ -971,8 +989,6 @@ void CPU::exec_thumb32_ldst_multiple(uint16_t hw1, uint16_t hw2) {
                     // EXC_RETURN via LDMIA/POP32: do writeback then exception return
                     if (!decrement && wback)
                         write_reg(rn, base + count * 4);
-                    fprintf(stderr, "[LDM-EXC] PC=0x%08X exc_ret=0x%08X rn=%d wback=%d SP=0x%08X PSP=0x%08X MSP=0x%08X cy=%.2fM\n",
-                            r[15], val, rn, wback, r[13], psp, msp, cycles / 1e6);
                     exception_return(val);
                     return;
                 }

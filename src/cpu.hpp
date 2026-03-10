@@ -40,6 +40,7 @@ public:
     uint64_t cycles = 0;
     bool halted = false;
     bool wfi = false;
+    bool event_reg = false;    // WFE event register (set by SEV, interrupts)
     bool irq_pending = false;  // Set when any interrupt state changes
     bool breakpoint_hit = false;
     uint32_t prev_pc_ = 0;

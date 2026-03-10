@@ -210,6 +210,7 @@ struct EmulatorContext {
         // Wire CPU to NVIC and DWT
         cpu.set_nvic(&nvic);
         nvic.set_irq_pending_flag(&cpu.irq_pending);
+        nvic.set_event_reg(&cpu.event_reg);
         nvic.set_cpu_pc(&cpu.r[15]);
         bus.cpu_pc_ = &cpu.r[15];
         bus.cpu_cy_ = &cpu.cycles;
@@ -265,6 +266,7 @@ struct EmulatorContext {
 
         // Set PineTime default input pin states
         gpio.set_pin(PineDef::CHARGE_IND, true);  // Not charging
+        gpio.set_pin(PineDef::TOUCH_IRQ, true);   // Touch IRQ idle (active low)
         gpio.set_pin(PineDef::POWER_PRES, false);  // No USB power
         gpio.set_pin(PineDef::BUTTON, false);       // Button not pressed
 
@@ -322,14 +324,17 @@ static int run_headless(EmulatorContext& emu, uint32_t timeout_ms, bool trace) {
     int snap_idx = 0;
     uint64_t next_snap = start + 64'000'000;
 
-    // Set breakpoints for key addresses
-    // No breakpoints — InfiniTime booting
-
     while (emu.cpu.cycles - start < max_cycles && !emu.cpu.halted) {
         uint64_t target = emu.cpu.cycles + 10000;
-        emu.cpu.run(target);
-        emu.tick_peripherals();
-        emu.cpu.check_exceptions();
+        if (emu.cpu.wfi) {
+            emu.cpu.cycles = target;
+            emu.tick_peripherals();
+            emu.cpu.check_exceptions();
+        } else {
+            emu.cpu.run(target);
+            emu.tick_peripherals();
+            emu.cpu.check_exceptions();
+        }
 
         if (emu.cpu.breakpoint_hit) {
             fprintf(stderr, "[BP] PC=0x%08X cy=%.2fM SP=0x%08X LR=0x%08X R0=0x%08X R1=0x%08X R3=0x%08X xPSR=0x%08X prev=0x%08X\n",
@@ -546,31 +551,45 @@ static int run_interactive(EmulatorContext& emu) {
             case SDL_QUIT:
                 running = false;
                 break;
-            case SDL_KEYDOWN:
+            case SDL_KEYDOWN: {
                 if (event.key.keysym.sym == SDLK_ESCAPE) running = false;
                 if (event.key.keysym.sym == SDLK_SPACE)
-                    emu.gpio.set_pin(PineDef::BUTTON, true); // Button press
+                    emu.gpio.set_pin(PineDef::BUTTON, true);
+                if (!event.key.repeat) {
+                    uint8_t gesture = 0;
+                    switch (event.key.keysym.sym) {
+                    case SDLK_w: gesture = 0x02; break; // Swipe Up
+                    case SDLK_s: gesture = 0x01; break; // Swipe Down
+                    case SDLK_a: gesture = 0x03; break; // Swipe Left
+                    case SDLK_d: gesture = 0x04; break; // Swipe Right
+                    default: break;
+                    }
+                    if (gesture) {
+                        const char* names[] = {"?","Down","Up","Left","Right"};
+                        fprintf(stderr, "[TOUCH] %s (gesture=%d) at %.1fs\n",
+                                names[gesture], gesture, emu.cpu.cycles / 64e6);
+                        emu.touch.set_touch(false, 0, 0);
+                        emu.touch.set_touch(true, 120, 120, gesture);
+                    }
+                }
                 break;
+            }
             case SDL_KEYUP:
                 if (event.key.keysym.sym == SDLK_SPACE)
                     emu.gpio.set_pin(PineDef::BUTTON, false);
+                if (event.key.keysym.sym == SDLK_w || event.key.keysym.sym == SDLK_a ||
+                    event.key.keysym.sym == SDLK_s || event.key.keysym.sym == SDLK_d)
+                    emu.touch.set_touch(false, 0, 0);
                 break;
             case SDL_MOUSEBUTTONDOWN:
                 if (event.button.button == SDL_BUTTON_LEFT) {
                     int mx = event.button.x / scale;
                     int my = event.button.y / scale;
-                    emu.touch.set_touch(true, mx, my);
+                    emu.touch.set_touch(true, mx, my, 0x05);
                 }
                 break;
             case SDL_MOUSEBUTTONUP:
                 emu.touch.set_touch(false, 0, 0);
-                break;
-            case SDL_MOUSEMOTION:
-                if (event.motion.state & SDL_BUTTON_LMASK) {
-                    int mx = event.motion.x / scale;
-                    int my = event.motion.y / scale;
-                    emu.touch.set_touch(true, mx, my);
-                }
                 break;
             }
         }
@@ -591,6 +610,7 @@ static int run_interactive(EmulatorContext& emu) {
                 emu.cpu.check_exceptions();
             }
         }
+
 
         // Periodic status
         if (emu.cpu.cycles - last_status >= 64'000'000) {
