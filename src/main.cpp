@@ -523,7 +523,9 @@ static int run_headless(EmulatorContext& emu, uint32_t timeout_ms, bool trace) {
         if (items > 0)
             fprintf(stderr, "  Ready[%d]: %d items, pxIndex=0x%08X\n", p, items, emu.bus.read32(list+4));
     }
-    return emu.cpu.halted ? 1 : 0;
+    // BKPT with R0=0 → exit 0 (PASS), R0>0 → exit R0 (test number that failed)
+    if (emu.cpu.halted) return emu.cpu.r[0] == 0 ? 0 : (int)emu.cpu.r[0];
+    return 124; // timeout
 }
 
 static int run_interactive(EmulatorContext& emu) {

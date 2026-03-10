@@ -745,7 +745,8 @@ void CPU::exec_thumb16(uint16_t inst) {
             fprintf(stderr, "[CPU] UDF at 0x%08X\n", r[15]);
             halted = true;
         } else if (cond == 0xF) {
-            // SVC
+            // SVC — return address is the instruction AFTER SVC
+            r[15] += 2;
             exception_entry(11); // SVCall = exception 11
         } else if (condition_passed(cond)) {
             int32_t offset = (int32_t)(int8_t)(inst & 0xFF) << 1;
@@ -1613,16 +1614,16 @@ void CPU::exec_thumb32_dp_register(uint16_t hw1, uint16_t hw2) {
 
     // Misc operations (op1=8-11: REV, REV16, RBIT, REVSH, CLZ)
     if ((op1 & 0xC) == 0x8) {
-        // RBIT, REV, REV16, REVSH, CLZ
         uint32_t val = read_reg(rm);
         switch (op2) {
-        case 0x0: // REV (also check op1)
-            if (op1 == 2) r[rd] = __builtin_bswap32(val);
+        case 0x8: // REV or CLZ (disambiguate by op1)
+            if ((op1 & 3) == 0) r[rd] = __builtin_bswap32(val);           // REV: op1=10_00
+            else if ((op1 & 3) == 3) r[rd] = val ? __builtin_clz(val) : 32; // CLZ: op1=10_11
             break;
-        case 0x1: // REV16
+        case 0x9: // REV16
             r[rd] = ((val & 0xFF00FF00) >> 8) | ((val & 0x00FF00FF) << 8);
             break;
-        case 0x2: // RBIT
+        case 0xA: // RBIT
             {
                 uint32_t result = 0;
                 for (int i = 0; i < 32; i++)
@@ -1630,14 +1631,11 @@ void CPU::exec_thumb32_dp_register(uint16_t hw1, uint16_t hw2) {
                 r[rd] = result;
             }
             break;
-        case 0x3: // REVSH
+        case 0xB: // REVSH
             r[rd] = (int32_t)(int16_t)__builtin_bswap16(val & 0xFFFF);
             break;
-        case 0x8: // CLZ
-            r[rd] = val ? __builtin_clz(val) : 32;
-            break;
         default:
-            fprintf(stderr, "[CPU] Unimpl misc DP reg op2=%d at 0x%08X\n", op2, r[15]);
+            fprintf(stderr, "[CPU] Unimpl misc DP reg op2=0x%X at 0x%08X\n", op2, r[15]);
             break;
         }
         return;
@@ -1746,12 +1744,9 @@ void CPU::exec_vfp(uint16_t hw1, uint16_t hw2) {
 
     // VMOV between ARM core and single-precision (MCR/MRC, cp10)
     if (cp == 10 && (opc1 & 0xE) == 0xE) {
-        uint8_t rt = (hw1 & 0xF);
-        // Re-decode: this is VMRS/VMSR or VMOV
-        // MRC: bit 20 set (read from coproc to ARM)
-        // MCR: bit 20 clear (write from ARM to coproc)
-        bool to_arm = hw1 & 0x10; // L bit for MRC
-        uint8_t crn = (hw2 >> 16) & 0xF;
+        uint8_t rt = (hw2 >> 12) & 0xF;   // Rt in hw2[15:12]
+        uint8_t crn = hw1 & 0xF;          // CRn in hw1[3:0]
+        bool to_arm = hw1 & 0x10;         // L bit (MRC=1, MCR=0)
 
         if (opc1 == 0xF && to_arm) {
             // VMRS: Move FP status to ARM register
@@ -1816,14 +1811,29 @@ void CPU::exec_vfp_ldst(uint16_t hw1, uint16_t hw2) {
     uint8_t imm8 = inst & 0xFF;
     uint32_t offset = imm8 * 4;
 
+    // VMOV between two ARM core regs and double: p=0, u=0
+    if (is_dp && p == 0 && !u) {
+        uint8_t rt = (inst >> 12) & 0xF;
+        uint8_t rt2 = (inst >> 16) & 0xF;
+        uint8_t vm2 = ((inst >> 5) & 1) << 4 | (inst & 0xF);
+        if (l) { r[rt] = s[vm2*2]; r[rt2] = s[vm2*2+1]; }
+        else   { s[vm2*2] = r[rt]; s[vm2*2+1] = r[rt2]; }
+        return;
+    }
+    // VMOV between two ARM core regs and two singles: p=0, u=0
+    if (!is_dp && p == 0 && !u) {
+        uint8_t rt = (inst >> 12) & 0xF;
+        uint8_t rt2 = (inst >> 16) & 0xF;
+        uint8_t vm2 = ((inst & 0xF) << 1) | ((inst >> 5) & 1);
+        if (l) { r[rt] = s[vm2]; r[rt2] = s[vm2+1]; }
+        else   { s[vm2] = r[rt]; s[vm2+1] = r[rt2]; }
+        return;
+    }
+
     if (is_dp) {
-        uint8_t vd = ((inst >> 12) & 0xF) | ((inst & (1<<22)) ? 16 : 0);
-        vd /= 2; // For double, Dd index. Actually: D:Vd = (inst[22]<<4)|(inst[15:12])
-        // Re-decode properly for double
         uint8_t d = (inst >> 22) & 1;
         uint8_t vd_raw = (inst >> 12) & 0xF;
-        vd = (d << 4) | vd_raw;
-        // vd is now the Dd register number
+        uint8_t vd = (d << 4) | vd_raw;
 
         if (p == 1 && w == 0) {
             // VLDR/VSTR (immediate, no writeback)
@@ -1894,24 +1904,6 @@ void CPU::exec_vfp_ldst(uint16_t hw1, uint16_t hw2) {
         }
     }
 
-    // VMOV between two ARM core regs and two single-precision / one double
-    if (cp == 10 && p == 0 && !w) {
-        uint8_t rt = (inst >> 12) & 0xF;
-        uint8_t rt2 = (inst >> 16) & 0xF;
-        uint8_t vm = ((inst & 0xF) << 1) | ((inst >> 5) & 1);
-        if (l) { r[rt] = s[vm]; r[rt2] = s[vm+1]; }
-        else   { s[vm] = r[rt]; s[vm+1] = r[rt2]; }
-        return;
-    }
-    if (cp == 11 && p == 0 && !w) {
-        uint8_t rt = (inst >> 12) & 0xF;
-        uint8_t rt2 = (inst >> 16) & 0xF;
-        uint8_t vm = ((inst >> 5) & 1) << 4 | (inst & 0xF);
-        if (l) { r[rt] = s[vm*2]; r[rt2] = s[vm*2+1]; }
-        else   { s[vm*2] = r[rt]; s[vm*2+1] = r[rt2]; }
-        return;
-    }
-
     fprintf(stderr, "[CPU] Unimpl VFP ldst hw1=%04X hw2=%04X at 0x%08X\n", hw1, hw2, r[15]);
 }
 
@@ -1933,18 +1925,18 @@ void CPU::exec_vfp_dp(uint32_t inst) {
         float a = sf(vn), b = sf(vm);
         float result;
         switch (opc1 & 0xB) { // Remove bit 2 (opc1[2] is part of some encodings)
-        case 0x0: // VMLA/VMLS
-            result = (opc1 & 4) ? sf(vd) - a*b : sf(vd) + a*b;
+        case 0x0: // VMLA/VMLS (opc3[0] selects MLS)
+            result = (opc3 & 1) ? sf(vd) - a*b : sf(vd) + a*b;
             sf(vd) = result; return;
         case 0x1: // VNMLA/VNMLS/VNMUL
-            if (opc3 & 1) { sf(vd) = -(a*b); return; } // VNMUL
-            result = (opc1 & 4) ? -(sf(vd) - a*b) : -(sf(vd) + a*b);
+            if (opc3 & 2) { sf(vd) = -(a*b); return; } // VNMUL (opc3=1x)
+            result = (opc3 & 1) ? -(sf(vd) - a*b) : -(sf(vd) + a*b);
             sf(vd) = result; return;
         case 0x2: // VMUL/VNMUL
             sf(vd) = (opc1 & 4) ? a*b : a*b; // bit 2 selects VMUL vs VNMUL
             return;
-        case 0x3: // VADD/VSUB
-            sf(vd) = (opc1 & 4) ? a - b : a + b; return;
+        case 0x3: // VADD/VSUB (opc3[0] selects SUB)
+            sf(vd) = (opc3 & 1) ? a - b : a + b; return;
         case 0x8: // VDIV
             sf(vd) = a / b; return;
         case 0xB: // Misc: VMOV, VABS, VNEG, VSQRT, VCMP, VCVT
@@ -1962,9 +1954,9 @@ void CPU::exec_vfp_dp(uint32_t inst) {
 
         double a = df(vn), b = df(vm_idx);
         switch (opc1 & 0xB) {
-        case 0x0: set_df(vd, (opc1&4) ? df(vd)-a*b : df(vd)+a*b); return;
+        case 0x0: set_df(vd, (opc3&1) ? df(vd)-a*b : df(vd)+a*b); return;
         case 0x2: set_df(vd, a*b); return;
-        case 0x3: set_df(vd, (opc1&4) ? a-b : a+b); return;
+        case 0x3: set_df(vd, (opc3&1) ? a-b : a+b); return;
         case 0x8: set_df(vd, a/b); return;
         case 0xB: exec_vfp_misc_double(inst, vd, vm_idx); return;
         }
@@ -1976,14 +1968,27 @@ void CPU::exec_vfp_misc_single(uint32_t inst, uint8_t vd, uint8_t vm) {
     uint8_t opc2 = (inst >> 16) & 0xF;
     uint8_t opc3 = (inst >> 6) & 0x3;
 
+    // VMOV (immediate): opc3 == 0, opc2 = imm4H (part of immediate)
+    if (opc3 == 0) {
+        uint8_t imm4H = opc2;
+        uint8_t imm4L = inst & 0xF;
+        uint8_t imm8 = (imm4H << 4) | imm4L;
+        uint32_t a = (imm8 >> 7) & 1;
+        uint32_t b = (imm8 >> 6) & 1;
+        uint32_t cdefgh = imm8 & 0x3F;
+        uint32_t result = (a << 31) | ((!b) << 30) | (b ? (0x1Fu << 25) : 0) | (cdefgh << 19);
+        s[vd] = result;
+        return;
+    }
+
     switch (opc2) {
-    case 0x0: // VMOV imm, VMOV reg, VABS
-        if (opc3 & 1) sf(vd) = fabsf(sf(vm)); // VABS
-        else { s[vd] = s[vm]; } // VMOV reg
+    case 0x0: // VMOV reg, VABS
+        if (opc3 & 2) sf(vd) = fabsf(sf(vm)); // VABS (opc3=11)
+        else { s[vd] = s[vm]; } // VMOV reg (opc3=01)
         return;
     case 0x1: // VNEG, VSQRT
-        if (opc3 & 1) sf(vd) = sqrtf(sf(vm)); // VSQRT
-        else sf(vd) = -sf(vm); // VNEG
+        if (opc3 & 2) sf(vd) = sqrtf(sf(vm)); // VSQRT (opc3=11)
+        else sf(vd) = -sf(vm); // VNEG (opc3=01)
         return;
     case 0x4: case 0x5: // VCMP, VCMPE
     {
