@@ -211,6 +211,10 @@ void CPU::exception_return(uint32_t exc_return) {
     r[15] = return_addr & ~1u;
     branch_taken_ = true;
     irq_pending = true;  // Execution priority changed, re-check
+    if (return_addr == 0 || return_addr == 0xFFFFFFFF || return_addr > 0x80000) {
+        fprintf(stderr, "[EXC-RET] SUSPICIOUS return_addr=0x%08X exc=0x%08X frame_sp_was=0x%08X psp=%d xpsr_ret=0x%08X cy=%.2fM\n",
+                return_addr, exc_return, frame_sp - 32, return_to_psp, return_xpsr, cycles / 1e6);
+    }
 }
 
 void CPU::check_exceptions() {
@@ -305,6 +309,22 @@ uint16_t hw1 = bus_->read16(r[15]);
         if (wild_count++ >= 2) { halted = true; return; }
     }
 
+    // Detect execution entering vector table area after boot
+    if (r[15] < 0x100 && cycles > 100000000ULL && inst_pc >= 0x100) {
+        fprintf(stderr, "[CPU] Entered vector table! PC=0x%08X from inst@0x%08X hw1=0x%04X cy=%llu\n",
+                r[15], inst_pc, hw1, (unsigned long long)cycles);
+        fprintf(stderr, "  R0-R7: %08X %08X %08X %08X %08X %08X %08X %08X\n",
+                r[0],r[1],r[2],r[3],r[4],r[5],r[6],r[7]);
+        fprintf(stderr, "  R8-R12: %08X %08X %08X %08X %08X SP=0x%08X LR=0x%08X xPSR=0x%08X\n",
+                r[8],r[9],r[10],r[11],r[12],r[13],r[14],xpsr);
+        // Dump the stack around the pop
+        uint32_t dump_sp = r[13] - 36; // SP before the pop
+        fprintf(stderr, "  Stack dump from 0x%08X:\n    ", dump_sp);
+        for (int i = 0; i < 12; i++)
+            fprintf(stderr, "%08X ", bus_->read32(dump_sp + i*4));
+        fprintf(stderr, "\n");
+    }
+
     // Advance IT state only if we were already in IT block before this instruction
     // (IT instruction itself sets up the block but should not be advanced)
     if (was_in_it) advance_it();
@@ -333,6 +353,22 @@ void CPU::run(uint64_t target_cycles) {
             if (wfi) { cycles++; continue; }
         }
         step();
+        if (num_breakpoints > 0) {
+            for (int i = 0; i < num_breakpoints; i++) {
+                if (r[15] == breakpoints[i]) {
+                    fprintf(stderr, "[BP] PC=0x%08X cy=%.2fM SP=0x%08X LR=0x%08X\n",
+                            r[15], cycles / 1e6, r[13], r[14]);
+                    breakpoint_hit = true;
+                    return;
+                }
+            }
+        }
+        // Detect InfiniTime → MCUBoot transition (including via address 0)
+        if (prev_pc_ >= 0x8000 && r[15] < 0x8000) {
+            fprintf(stderr, "[TRANSITION] prev=0x%08X new=0x%08X LR=0x%08X SP=0x%08X cy=%.2fM xpsr=0x%08X\n",
+                    prev_pc_, r[15], r[14], r[13], cycles / 1e6, xpsr);
+        }
+        prev_pc_ = r[15];
     }
 }
 
@@ -860,7 +896,13 @@ void CPU::exec_thumb32_01(uint16_t hw1, uint16_t hw2, uint8_t op2) {
         exec_thumb32_dp_shifted_reg(hw1, hw2);
     } else {
         // Coprocessor / FP (op1=01, op2 bit 6 set)
-        exec_vfp_ldst(hw1, hw2);
+        // hw1[11:8]=110x → STC/LDC (memory); 1110 → MCR/MRC/CDP (register)
+        if ((hw1 & 0x0F00) == 0x0E00) {
+            if (hw2 & 0x10) exec_vfp(hw1, hw2);      // MCR/MRC
+            else exec_vfp_dp((hw1 << 16) | hw2);      // CDP
+        } else {
+            exec_vfp_ldst(hw1, hw2);                   // STC/LDC/VLDR/VSTR/VLDM/VSTM
+        }
     }
 }
 
@@ -925,6 +967,15 @@ void CPU::exec_thumb32_ldst_multiple(uint16_t hw1, uint16_t hw2) {
         if (load) {
             uint32_t val = bus_->read32(addr);
             if (i == 15) {
+                if ((val & 0xF0000000) == 0xF0000000) {
+                    // EXC_RETURN via LDMIA/POP32: do writeback then exception return
+                    if (!decrement && wback)
+                        write_reg(rn, base + count * 4);
+                    fprintf(stderr, "[LDM-EXC] PC=0x%08X exc_ret=0x%08X rn=%d wback=%d SP=0x%08X PSP=0x%08X MSP=0x%08X cy=%.2fM\n",
+                            r[15], val, rn, wback, r[13], psp, msp, cycles / 1e6);
+                    exception_return(val);
+                    return;
+                }
                 r[15] = val & ~1u;
                 branch_taken_ = true;
             } else {
@@ -1420,7 +1471,7 @@ void CPU::exec_thumb32_misc_control(uint16_t hw1, uint16_t hw2) {
 // ---- Load/Store Single ----
 void CPU::exec_thumb32_ldst_single(uint16_t hw1, uint16_t hw2) {
     uint8_t size = (hw1 >> 5) & 3;  // 00=byte, 01=half, 10=word
-    bool sign = hw1 & 0x800;        // hw1[11]: signed load
+    bool sign = hw1 & 0x100;        // hw1[8]: signed load (LDRSB/LDRSH vs LDRB/LDRH)
     bool load = hw1 & 0x10;         // hw1[4]: load vs store
     bool imm12_form = hw1 & 0x80;   // hw1[7]: 1=positive imm12, 0=imm8/register
     uint8_t rn = hw1 & 0xF;
@@ -1470,6 +1521,10 @@ void CPU::exec_thumb32_ldst_single(uint16_t hw1, uint16_t hw2) {
         default: val = 0;
         }
         if (rt == 15) {
+            if ((val & 0xF0000000) == 0xF0000000) {
+                exception_return(val);
+                return;
+            }
             r[15] = val & ~1u;
             branch_taken_ = true;
         } else {
@@ -1593,6 +1648,15 @@ void CPU::exec_thumb32_multiply(uint16_t hw1, uint16_t hw2) {
         else // MLS
             r[rd] = read_reg(ra) - read_reg(rn) * read_reg(rm);
         break;
+    case 1: { // SMLABB/SMLABT/SMLATB/SMLATT / SMULBB etc.
+        int32_t n = read_reg(rn), m = read_reg(rm);
+        int16_t nh = (op2 & 2) ? (n >> 16) : n;
+        int16_t mh = (op2 & 1) ? (m >> 16) : m;
+        int32_t product = (int32_t)nh * (int32_t)mh;
+        if (ra == 15) r[rd] = product;            // SMULxx
+        else r[rd] = product + read_reg(ra);       // SMLAxx
+        break;
+    }
     default:
         fprintf(stderr, "[CPU] Unimpl multiply op1=%d at 0x%08X\n", op1, r[15]);
         break;
@@ -1697,10 +1761,10 @@ void CPU::exec_vfp(uint16_t hw1, uint16_t hw2) {
     uint32_t inst = (hw1 << 16) | hw2;
 
     // VMOV between ARM core register and single-precision
-    if ((inst & 0x0F100F10) == 0x0E000A10) {
+    if ((inst & 0x0F000F10) == 0x0E000A10) {
         bool to_arm = inst & (1<<20);
         uint8_t rt2 = (inst >> 12) & 0xF;
-        uint8_t vn2 = ((inst >> 16) & 0xF) | ((inst & (1<<7)) ? 16 : 0);
+        uint8_t vn2 = (((inst >> 16) & 0xF) << 1) | ((inst >> 7) & 1);  // Sn = Vn*2 + N
         if (to_arm) r[rt2] = s[vn2];
         else s[vn2] = r[rt2];
         return;
@@ -1776,7 +1840,7 @@ void CPU::exec_vfp_ldst(uint16_t hw1, uint16_t hw2) {
             }
             if (w) {
                 if (u) r[rn] = base + offset;
-                else r[rn] = base - offset;
+                else r[rn] = base; // base already decremented
                 if (rn == 13) { if (control & 2) psp = r[13]; else msp = r[13]; }
             }
             return;

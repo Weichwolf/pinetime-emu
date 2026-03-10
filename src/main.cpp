@@ -17,6 +17,8 @@
 #include "device/ppi.hpp"
 #include "device/saadc.hpp"
 #include "device/temp.hpp"
+#include "device/spi_flash.hpp"
+#include "device/egu.hpp"
 #include <SDL2/SDL.h>
 #include <cstdio>
 #include <cstdlib>
@@ -131,7 +133,7 @@ struct EmulatorContext {
     pt::ECB ecb;
     StubDevice fpu_stub;
     StubDevice ccm_stub;
-    StubDevice swi0_stub, swi1_stub, swi2_stub, swi3_stub, swi4_stub, swi5_stub;
+    pt::EGU egu0, egu1, egu2, egu3, egu4, egu5;
     StubDevice stub_device;
     DWT dwt;
 
@@ -141,176 +143,9 @@ struct EmulatorContext {
     pt::HRS3300 hrs;
     pt::BMA4xx bma;
 
-    // External SPI flash (4MB, all 0xFF = empty)
-    // Also memory-mapped at 0x04000000 for MCUBoot/InfiniTime flash area access
-    static constexpr uint32_t EXT_FLASH_SIZE = 4 * 1024 * 1024;
+    // External SPI flash (4MB, memory-mapped at 0x04000000)
     static constexpr uint32_t EXT_FLASH_MMAP = 0x04000000;
-    std::vector<uint8_t> ext_flash = std::vector<uint8_t>(EXT_FLASH_SIZE, 0xFF);
-
-    // Memory-mapped view of external SPI flash
-    struct ExtFlashMmap : pt::Device {
-        std::vector<uint8_t>* flash;
-        uint32_t read(uint32_t addr, pt::Width w) override {
-            if (addr >= flash->size()) return 0xFF;
-            switch (w) {
-            case pt::Width::Byte: return (*flash)[addr];
-            case pt::Width::Half: return (*flash)[addr] | ((*flash)[addr+1] << 8);
-            case pt::Width::Word: return (*flash)[addr] | ((*flash)[addr+1] << 8) |
-                                         ((*flash)[addr+2] << 16) | ((*flash)[addr+3] << 24);
-            }
-            return 0xFF;
-        }
-        void write(uint32_t addr, pt::Width w, uint32_t val) override {
-            if (addr >= flash->size()) return;
-            switch (w) {
-            case pt::Width::Byte: (*flash)[addr] = val; break;
-            case pt::Width::Half: (*flash)[addr] = val; (*flash)[addr+1] = val >> 8; break;
-            case pt::Width::Word:
-                (*flash)[addr] = val; (*flash)[addr+1] = val >> 8;
-                (*flash)[addr+2] = val >> 16; (*flash)[addr+3] = val >> 24; break;
-            }
-        }
-    } ext_flash_mmap;
-
-    // SPI flash state machine (for byte-at-a-time legacy SPI)
-    uint8_t flash_cmd_ = 0;
-    uint32_t flash_addr_ = 0;
-    uint8_t flash_phase_ = 0;   // 0=cmd, 1-3=addr bytes, 4+=data
-    bool flash_wren_ = false;
-
-    void spi_flash_reset_cmd() { flash_cmd_ = 0; flash_phase_ = 0; }
-
-    void spi_flash_transfer(const uint8_t* tx, uint32_t tx_len,
-                            uint8_t* rx, uint32_t rx_len) {
-        // DMA transfers: process whole buffer at once
-        if (tx_len > 1) {
-            spi_flash_dma(tx, tx_len, rx, rx_len);
-            return;
-        }
-        // Legacy SPI: byte-at-a-time
-        if (tx_len == 0) return;
-        uint8_t tx_byte = tx[0];
-        uint8_t rx_byte = 0xFF;
-
-        if (flash_phase_ == 0) {
-            // Command byte
-            flash_cmd_ = tx_byte;
-            flash_addr_ = 0;
-            flash_phase_ = 1;
-            switch (flash_cmd_) {
-            case 0x06: flash_wren_ = true; flash_phase_ = 0; break;
-            case 0x04: flash_wren_ = false; flash_phase_ = 0; break;
-            case 0xC7: // CHIP_ERASE
-                if (flash_wren_) memset(ext_flash.data(), 0xFF, ext_flash.size());
-                flash_wren_ = false; flash_phase_ = 0; break;
-            case 0xAB: flash_phase_ = 4; break; // skip 3 dummy bytes then ID
-            }
-        } else if (flash_cmd_ == 0x9F) {
-            // JEDEC ID: XT25F32B (XTX, matches PineTime hardware)
-            static const uint8_t jedec[] = {0x0B, 0x40, 0x16};
-            rx_byte = (flash_phase_ <= 3) ? jedec[flash_phase_ - 1] : 0xFF;
-            flash_phase_++;
-        } else if (flash_cmd_ == 0x05) {
-            rx_byte = 0; // Status: not busy
-            flash_phase_++;
-        } else if (flash_phase_ <= 3) {
-            // Address bytes (3 bytes, MSB first)
-            flash_addr_ = (flash_addr_ << 8) | tx_byte;
-            flash_phase_++;
-        } else if (flash_cmd_ == 0x0B && flash_phase_ == 4) {
-            // FAST_READ dummy byte
-            flash_phase_++;
-        } else {
-            // Data phase
-            uint32_t fa = flash_addr_;
-            switch (flash_cmd_) {
-            case 0x03: // READ
-            case 0x0B: // FAST_READ
-                rx_byte = (fa < ext_flash.size()) ? ext_flash[fa] : 0xFF;
-                flash_addr_++;
-                break;
-            case 0x02: // PAGE_PROGRAM
-                if (fa < ext_flash.size() && flash_wren_) ext_flash[fa] &= tx_byte;
-                flash_addr_++;
-                break;
-            case 0x20: // SECTOR_ERASE (addr already collected)
-            case 0xD8: { // BLOCK_ERASE
-                if (flash_wren_) {
-                    uint32_t len = (flash_cmd_ == 0x20) ? 4096 : 65536;
-                    uint32_t base = fa & ~(len - 1);
-                    if (base + len <= ext_flash.size())
-                        memset(&ext_flash[base], 0xFF, len);
-                }
-                flash_wren_ = false;
-                flash_phase_ = 0;
-                break;
-            }
-            case 0xAB: // Release Deep Power-Down + Read ID
-                rx_byte = 0x15; // Device ID
-                flash_phase_++;
-                break;
-            default:
-                break;
-            }
-        }
-
-        if (rx_len > 0) rx[0] = rx_byte;
-    }
-
-    void spi_flash_dma(const uint8_t* tx, uint32_t tx_len,
-                       uint8_t* rx, uint32_t rx_len) {
-        if (tx_len == 0) return;
-        uint8_t cmd = tx[0];
-        switch (cmd) {
-        case 0x9F:
-            if (rx_len > 1) rx[1] = 0x0B;  // XTX
-            if (rx_len > 2) rx[2] = 0x40;
-            if (rx_len > 3) rx[3] = 0x16;
-            break;
-        case 0x05:
-            if (rx_len > 1) rx[1] = 0;
-            break;
-        case 0x03:
-        case 0x0B: {
-            if (tx_len < 4) break;
-            uint32_t addr = (tx[1] << 16) | (tx[2] << 8) | tx[3];
-            uint32_t skip = (cmd == 0x0B) ? 5 : 4;
-            for (uint32_t i = skip; i < rx_len; i++) {
-                uint32_t fa = addr + (i - skip);
-                rx[i] = (fa < ext_flash.size()) ? ext_flash[fa] : 0xFF;
-            }
-            break;
-        }
-        case 0x06: flash_wren_ = true; break;
-        case 0x04: flash_wren_ = false; break;
-        case 0x02: {
-            if (tx_len < 5 || !flash_wren_) break;
-            uint32_t addr = (tx[1] << 16) | (tx[2] << 8) | tx[3];
-            for (uint32_t i = 4; i < tx_len; i++) {
-                uint32_t fa = addr + (i - 4);
-                if (fa < ext_flash.size()) ext_flash[fa] &= tx[i];
-            }
-            flash_wren_ = false;
-            break;
-        }
-        case 0x20:
-        case 0xD8: {
-            if (tx_len < 4 || !flash_wren_) break;
-            uint32_t addr = (tx[1] << 16) | (tx[2] << 8) | tx[3];
-            uint32_t len = (cmd == 0x20) ? 4096 : 65536;
-            addr &= ~(len - 1);
-            if (addr + len <= ext_flash.size())
-                memset(&ext_flash[addr], 0xFF, len);
-            flash_wren_ = false;
-            break;
-        }
-        case 0xC7:
-            if (flash_wren_) memset(ext_flash.data(), 0xFF, ext_flash.size());
-            flash_wren_ = false;
-            break;
-        }
-        flash_phase_ = 0;
-    }
+    pt::SpiFlash ext_flash{4 * 1024 * 1024};
 
     pt::Bus bus;
     pt::CPU cpu{&bus};
@@ -337,6 +172,7 @@ struct EmulatorContext {
         bus.map(0x4000C000, 0x1000, &temp);         // TEMP
         bus.map(0x4000D000, 0x1000, &rng);         // RNG
         radio.set_nvic(&nvic, 1);
+        ppi.set_bus(&bus);
         saadc.set_bus(&bus);
         saadc.set_nvic(&nvic, 7);
         temp.set_nvic(&nvic, 12);
@@ -347,19 +183,24 @@ struct EmulatorContext {
         bus.map(0x40010000, 0x1000, &wdt);         // WDT
         bus.map(0x40011000, 0x1000, &rtc1);        // RTC1
         bus.map(0x4001E000, 0x1000, &nvmc);        // NVMC
-        bus.map(0x40014000, 0x1000, &swi0_stub);    // SWI0/EGU0
-        bus.map(0x40015000, 0x1000, &swi1_stub);    // SWI1/EGU1
-        bus.map(0x40016000, 0x1000, &swi2_stub);    // SWI2/EGU2
-        bus.map(0x40017000, 0x1000, &swi3_stub);    // SWI3/EGU3
-        bus.map(0x40018000, 0x1000, &swi4_stub);    // SWI4/EGU4
-        bus.map(0x40019000, 0x1000, &swi5_stub);    // SWI5/EGU5
+        bus.map(0x40014000, 0x1000, &egu0);    // SWI0/EGU0
+        bus.map(0x40015000, 0x1000, &egu1);    // SWI1/EGU1
+        bus.map(0x40016000, 0x1000, &egu2);    // SWI2/EGU2
+        bus.map(0x40017000, 0x1000, &egu3);    // SWI3/EGU3
+        bus.map(0x40018000, 0x1000, &egu4);    // SWI4/EGU4
+        bus.map(0x40019000, 0x1000, &egu5);    // SWI5/EGU5
+        egu0.set_nvic(&nvic, 20);
+        egu1.set_nvic(&nvic, 21);
+        egu2.set_nvic(&nvic, 22);
+        egu3.set_nvic(&nvic, 23);
+        egu4.set_nvic(&nvic, 24);
+        egu5.set_nvic(&nvic, 25);
         bus.map(0x4001F000, 0x1000, &ppi);            // PPI (at BPROT addr for nRF52)
         bus.map(0x40020000, 0x1000, &stub_device);  // Reserved
         bus.map(0x40024000, 0x1000, &rtc2);        // RTC2
         bus.map(0x4002A000, 0x1000, &fpu_stub);    // FPU access port
         bus.map(0x50000000, 0x1000, &gpio);         // GPIO P0
-        ext_flash_mmap.flash = &ext_flash;
-        bus.map(EXT_FLASH_MMAP, EXT_FLASH_SIZE, &ext_flash_mmap); // External SPI flash memory-mapped
+        bus.map(EXT_FLASH_MMAP, ext_flash.size(), &ext_flash); // External SPI flash memory-mapped
         bus.map(0xE0001000, 0x1000, &dwt);           // DWT (Data Watchpoint and Trace)
         bus.map(0xF0000000, 0x1000, &stub_device);   // CoreSight ROM Table
 
@@ -369,6 +210,10 @@ struct EmulatorContext {
         // Wire CPU to NVIC and DWT
         cpu.set_nvic(&nvic);
         nvic.set_irq_pending_flag(&cpu.irq_pending);
+        nvic.set_cpu_pc(&cpu.r[15]);
+        bus.cpu_pc_ = &cpu.r[15];
+        bus.cpu_cy_ = &cpu.cycles;
+        bus.watch_addr_ = 0;  // No watchpoint
         dwt.set_cpu(&cpu);
 
         // Wire peripherals to NVIC (nRF52 IRQ numbers)
@@ -386,6 +231,11 @@ struct EmulatorContext {
         twim1.set_bus(&bus);
         twim1.set_nvic(&nvic, 4);
 
+        // Wire GPIOTE to GPIO and NVIC
+        gpio.set_gpiote(&gpiote);
+        gpiote.set_gpio(&gpio);
+        gpiote.set_nvic(&nvic, 6);
+
         // Wire NVMC to flash
         nvmc.set_flash(&flash);
         flash.set_nvmc_config(nvmc.config_ptr());
@@ -396,10 +246,9 @@ struct EmulatorContext {
             bool lcd_cs = gpio.get_pin(PineDef::LCD_CS);
             bool flash_cs = gpio.get_pin(PineDef::SPI_FLASH_CS);
             if (!flash_cs) {
-                spi_flash_transfer(tx, tx_len, rx, rx_len);
+                ext_flash.transfer(tx, tx_len, rx, rx_len);
             }
             if (!lcd_cs) {
-                // LCD selected
                 bool dc = gpio.get_pin(PineDef::LCD_DC);
                 display.set_dc(dc);
                 display.spi_transfer(tx, tx_len);
@@ -407,6 +256,9 @@ struct EmulatorContext {
         });
 
         // Connect I2C devices to TWIM1
+        touch.set_irq_callback([this](bool active) {
+            gpio.set_pin(PineDef::TOUCH_IRQ, !active); // Active low
+        });
         twim1.attach(pt::CST816S::I2C_ADDR, &touch);
         twim1.attach(pt::HRS3300::I2C_ADDR, &hrs);
         twim1.attach(pt::BMA4xx::I2C_ADDR, &bma);
@@ -420,7 +272,7 @@ struct EmulatorContext {
         gpio.set_on_out_change([this](uint32_t old_out, uint32_t new_out) {
             uint32_t rising = new_out & ~old_out; // pins that went high
             if (rising & (1u << PineDef::SPI_FLASH_CS))
-                spi_flash_reset_cmd();
+                ext_flash.reset_cmd();
         });
     }
 
@@ -434,33 +286,25 @@ struct EmulatorContext {
         rtc2.tick(cpu.cycles);
         rng.tick(cpu.cycles);
         temp.tick(cpu.cycles);
+        ppi.tick(cpu.cycles);
     }
 };
 
 // ============================================================================
-// Display rendering: RGB565 → RGB888
+// Display rendering: direct RGB565 blit
 // ============================================================================
 
 static void render_display(SDL_Texture* tex, const pt::ST7789& display) {
-    uint32_t* pixels;
+    void* pixels;
     int pitch;
-    SDL_LockTexture(tex, nullptr, (void**)&pixels, &pitch);
+    SDL_LockTexture(tex, nullptr, &pixels, &pitch);
 
     const uint16_t* fb = display.framebuffer();
-    bool on = display.is_on();
-
-    for (int y = 0; y < DISPLAY_H; y++) {
-        for (int x = 0; x < DISPLAY_W; x++) {
-            uint32_t color = 0;
-            if (on) {
-                uint16_t c = fb[y * DISPLAY_W + x];
-                uint8_t r = ((c >> 11) & 0x1F) << 3;
-                uint8_t g = ((c >> 5) & 0x3F) << 2;
-                uint8_t b = (c & 0x1F) << 3;
-                color = (r << 16) | (g << 8) | b;
-            }
-            pixels[y * (pitch / 4) + x] = color;
-        }
+    if (display.is_on()) {
+        for (int y = 0; y < DISPLAY_H; y++)
+            memcpy((uint8_t*)pixels + y * pitch, fb + y * DISPLAY_W, DISPLAY_W * 2);
+    } else {
+        memset(pixels, 0, pitch * DISPLAY_H);
     }
 
     SDL_UnlockTexture(tex);
@@ -475,19 +319,55 @@ static int run_headless(EmulatorContext& emu, uint32_t timeout_ms, bool trace) {
     uint64_t start = emu.cpu.cycles;
     uint64_t last_report = start;
 
+    int snap_idx = 0;
+    uint64_t next_snap = start + 64'000'000;
+
+    // Set breakpoints for key addresses
+    // No breakpoints — InfiniTime booting
+
     while (emu.cpu.cycles - start < max_cycles && !emu.cpu.halted) {
         uint64_t target = emu.cpu.cycles + 10000;
         emu.cpu.run(target);
         emu.tick_peripherals();
         emu.cpu.check_exceptions();
 
+        if (emu.cpu.breakpoint_hit) {
+            fprintf(stderr, "[BP] PC=0x%08X cy=%.2fM SP=0x%08X LR=0x%08X R0=0x%08X R1=0x%08X R3=0x%08X xPSR=0x%08X prev=0x%08X\n",
+                    emu.cpu.r[15], emu.cpu.cycles/1e6, emu.cpu.r[13], emu.cpu.r[14],
+                    emu.cpu.r[0], emu.cpu.r[1], emu.cpu.r[3], emu.cpu.xpsr, emu.cpu.prev_pc_);
+            emu.cpu.breakpoint_hit = false;
+        }
         if (trace && emu.cpu.cycles - last_report >= 1000000) {
             fprintf(stderr, "[TRACE] %8.2fM  PC=0x%08X  SP=0x%08X  LR=0x%08X  xPSR=0x%08X\n",
                     (emu.cpu.cycles - start) / 1e6,
                     emu.cpu.r[15], emu.cpu.r[13], emu.cpu.r[14], emu.cpu.xpsr);
             last_report = emu.cpu.cycles;
         }
+
+        if (emu.cpu.cycles >= next_snap) {
+            char fname[32];
+            snprintf(fname, sizeof(fname), "snap_%02d.ppm", snap_idx);
+            const uint16_t* fb = emu.display.framebuffer();
+            FILE* f = fopen(fname, "wb");
+            if (f) {
+                fprintf(f, "P6\n240 240\n255\n");
+                for (int i = 0; i < 240*240; i++) {
+                    uint16_t c = fb[i];
+                    uint8_t rgb[3] = {
+                        (uint8_t)(((c >> 11) & 0x1F) << 3),
+                        (uint8_t)(((c >> 5) & 0x3F) << 2),
+                        (uint8_t)((c & 0x1F) << 3)
+                    };
+                    fwrite(rgb, 1, 3, f);
+                }
+                fclose(f);
+            }
+            snap_idx++;
+            next_snap += 64'000'000;
+        }
     }
+    fprintf(stderr, "[EMU] %d snapshots saved (snap_00.ppm .. snap_%02d.ppm)\n",
+            snap_idx, snap_idx > 0 ? snap_idx - 1 : 0);
 
     uint64_t elapsed = emu.cpu.cycles - start;
     fprintf(stderr, "[EMU] %llu cycles (%.2f M), %s\n",
@@ -500,18 +380,128 @@ static int run_headless(EmulatorContext& emu, uint32_t timeout_ms, bool trace) {
             emu.cpu.r[4],emu.cpu.r[5],emu.cpu.r[6],emu.cpu.r[7]);
     fprintf(stderr, "[EMU] R8-R12: %08X %08X %08X %08X %08X\n",
             emu.cpu.r[8],emu.cpu.r[9],emu.cpu.r[10],emu.cpu.r[11],emu.cpu.r[12]);
-    // Display state
+    // LFS buffer diagnostic
+    {
+        uint32_t buf_ptr = emu.bus.read32(0x2000C91C);
+        fprintf(stderr, "[LFS] tag_scan buffer@0x%08X, first 32 bytes:\n", buf_ptr);
+        for (int i = 0; i < 32; i++) {
+            if (i % 16 == 0) fprintf(stderr, "  +%03X:", i);
+            fprintf(stderr, " %02X", emu.bus.read8(buf_ptr + i));
+            if (i % 16 == 15) fprintf(stderr, "\n");
+        }
+        fprintf(stderr, "[LFS] SPIM rx buffer @0x20002A08, first 32 bytes:\n");
+        for (int i = 0; i < 32; i++) {
+            if (i % 16 == 0) fprintf(stderr, "  +%03X:", i);
+            fprintf(stderr, " %02X", emu.bus.read8(0x20002A08 + i));
+            if (i % 16 == 15) fprintf(stderr, "\n");
+        }
+    }
+    fprintf(stderr, "[SPIM0] transfers=%u\n", emu.spim0.transfer_count());
+    // External SPI flash state
+    {
+        int non_ff = 0;
+        for (uint32_t i = 0; i < emu.ext_flash.size() && i < 0x100000; i++)
+            if (emu.ext_flash.data()[i] != 0xFF) non_ff++;
+        fprintf(stderr, "[ExtFlash] non-0xFF bytes in first 1MB: %d, reads=%u writes=%u status=%u\n",
+                non_ff, emu.ext_flash.read_count_, emu.ext_flash.write_count_, emu.ext_flash.status_count_);
+    }
+    // Display state + screenshot
     {
         const uint16_t* fb = emu.display.framebuffer();
         int nonzero = 0;
         for (int i = 0; i < 240*240; i++) if (fb[i]) nonzero++;
-        fprintf(stderr, "[Display] on=%d, non-zero pixels: %d/%d\n",
-                emu.display.is_on() ? 1 : 0, nonzero, 240*240);
+        fprintf(stderr, "[Display] on=%d, non-zero=%d/%d, cmds=%u data=%uB px_wr=%u px_clip=%u ramwr=%u\n",
+                emu.display.is_on() ? 1 : 0, nonzero, 240*240,
+                emu.display.cmd_count(), emu.display.data_bytes(),
+                emu.display.pixels_written_, emu.display.pixels_clipped_,
+                emu.display.ramwr_count_);
+        // Dump PPM screenshot
+        FILE* f = fopen("screenshot.ppm", "wb");
+        if (f) {
+            fprintf(f, "P6\n240 240\n255\n");
+            for (int i = 0; i < 240*240; i++) {
+                uint16_t c = fb[i];
+                uint8_t rgb[3] = {
+                    (uint8_t)(((c >> 11) & 0x1F) << 3),
+                    (uint8_t)(((c >> 5) & 0x3F) << 2),
+                    (uint8_t)((c & 0x1F) << 3)
+                };
+                fwrite(rgb, 1, 3, f);
+            }
+            fclose(f);
+            fprintf(stderr, "[Display] Screenshot saved to screenshot.ppm\n");
+        }
     }
-    // FreeRTOS state dump
-    fprintf(stderr, "[FreeRTOS] pxCurrentTCB=0x%08X uxSchedulerSuspended=%d xTickCount=%u xNextUnblock=%u\n",
-            emu.bus.read32(0x2000F6C0), emu.bus.read32(0x2000F714),
-            emu.bus.read32(0x2000F794), emu.bus.read32(0x2000F74C));
+    // FreeRTOS state dump: scan SRAM for TCBs by looking for task name strings
+    fprintf(stderr, "[FreeRTOS] pxCurrentTCB=0x%08X xTickCount=%u\n",
+            emu.bus.read32(0x2000F6C0), emu.bus.read32(0x2000F794));
+    // Scan SRAM for plausible TCBs: offset 52 has readable ASCII name
+    for (uint32_t addr = 0x20000000; addr < 0x20010000; addr += 4) {
+        // Check if offset+52 looks like a task name (4+ printable chars starting with uppercase)
+        char c0 = emu.bus.read8(addr + 52);
+        if (!((c0 >= 'A' && c0 <= 'Z') || (c0 >= 'a' && c0 <= 'z'))) continue;
+        char name[17] = {};
+        bool valid = true;
+        int len = 0;
+        for (int i = 0; i < 16; i++) {
+            char c = emu.bus.read8(addr + 52 + i);
+            if (c == 0) break;
+            if (c < 32 || c > 126) { valid = false; break; }
+            name[i] = c;
+            len++;
+        }
+        if (!valid || len < 3) continue;
+        uint32_t sp = emu.bus.read32(addr);
+        if (sp < 0x20000000 || sp >= 0x20010000) continue;
+        // FreeRTOS M4F context: STMDB {R4-R11, LR(EXC_RETURN)} (9 words), then HW frame (8 words)
+        // sp+0..7: R4-R11, sp+8: EXC_RETURN, sp+9..16: R0,R1,R2,R3,R12,LR,PC,xPSR
+        uint32_t exc_ret = emu.bus.read32(sp + 8*4);
+        uint32_t saved_pc = emu.bus.read32(sp + 15*4);
+        uint32_t saved_lr = emu.bus.read32(sp + 14*4);
+        uint32_t saved_xpsr = emu.bus.read32(sp + 16*4);
+        fprintf(stderr, "  TCB@0x%08X sp=0x%08X pc=0x%08X lr=0x%08X xpsr=0x%08X exc=0x%08X name=\"%s\"\n",
+                addr, sp, saved_pc, saved_lr, saved_xpsr, exc_ret, name);
+        // Dump MAI stack for call chain analysis
+        if (name[0] == 'M' && name[1] == 'A' && name[2] == 'I') {
+            fprintf(stderr, "  [MAI stack dump from SP=0x%08X, 64 words]\n", sp);
+            for (int w = 0; w < 64; w++) {
+                uint32_t val = emu.bus.read32(sp + w*4);
+                if (w % 8 == 0) fprintf(stderr, "    +%03d:", w*4);
+                fprintf(stderr, " %08X", val);
+                if (w % 8 == 7) fprintf(stderr, "\n");
+            }
+        }
+    }
+    // VTOR and runtime vector table content
+    uint32_t vtor = emu.bus.read32(0xE000ED08);
+    fprintf(stderr, "[NVIC] VTOR=0x%08X\n", vtor);
+    fprintf(stderr, "[VTOR] PendSV(14)=0x%08X SysTick(15)=0x%08X\n",
+            emu.bus.read32(vtor + 14*4), emu.bus.read32(vtor + 15*4));
+    fprintf(stderr, "[VTOR] IRQ0=0x%08X IRQ1=0x%08X IRQ3=0x%08X IRQ17=0x%08X\n",
+            emu.bus.read32(vtor + 16*4), emu.bus.read32(vtor + 17*4),
+            emu.bus.read32(vtor + 19*4), emu.bus.read32(vtor + 33*4));
+    // PPI channel dump
+    fprintf(stderr, "[PPI] CHEN=0x%08X\n", emu.bus.read32(0x4001F500));
+    for (int i = 0; i < 20; i++) {
+        uint32_t eep = emu.bus.read32(0x4001F510 + i*8);
+        uint32_t tep = emu.bus.read32(0x4001F514 + i*8);
+        if (eep || tep) fprintf(stderr, "  CH[%d]: EEP=0x%08X TEP=0x%08X\n", i, eep, tep);
+    }
+    // Radio state
+    fprintf(stderr, "[Radio] state=%u shorts=0x%08X inten=0x%08X\n",
+            emu.bus.read32(0x40001550), emu.bus.read32(0x40001200), emu.bus.read32(0x40001300));
+    fprintf(stderr, "[Radio] ev: ready=%u addr=%u payload=%u end=%u disabled=%u\n",
+            emu.bus.read32(0x40001100), emu.bus.read32(0x40001104),
+            emu.bus.read32(0x40001108), emu.bus.read32(0x4000110C),
+            emu.bus.read32(0x40001110));
+    // TIMER0 state
+    fprintf(stderr, "[TIMER0] CC[0]=%u CC[1]=%u CC[2]=%u shorts=0x%08X inten=0x%08X\n",
+            emu.bus.read32(0x40008540), emu.bus.read32(0x40008544),
+            emu.bus.read32(0x40008548), emu.bus.read32(0x40008200),
+            emu.bus.read32(0x40008300));
+    fprintf(stderr, "[TIMER0] ev_cmp: [0]=%u [1]=%u [2]=%u [3]=%u\n",
+            emu.bus.read32(0x40008140), emu.bus.read32(0x40008144),
+            emu.bus.read32(0x40008148), emu.bus.read32(0x4000814C));
     // Read literal at 0x35ba0 (uxTopReadyPriority address) and 0x35ba4 (pxReadyTasksLists address)
     uint32_t addr_topready = emu.bus.read32(0x35ba0);
     uint32_t addr_readylists = emu.bus.read32(0x35ba4);
@@ -539,11 +529,12 @@ static int run_interactive(EmulatorContext& emu) {
         DISPLAY_W * scale, DISPLAY_H * scale, 0);
     SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
     SDL_Texture* texture = SDL_CreateTexture(renderer,
-        SDL_PIXELFORMAT_RGB888, SDL_TEXTUREACCESS_STREAMING,
+        SDL_PIXELFORMAT_RGB565, SDL_TEXTUREACCESS_STREAMING,
         DISPLAY_W, DISPLAY_H);
 
     constexpr uint64_t CYCLES_PER_FRAME = 64'000'000 / 60;
     bool running = true;
+    uint64_t last_status = 0;
 
     while (running && !emu.cpu.halted) {
         uint32_t frame_start = SDL_GetTicks();
@@ -586,16 +577,30 @@ static int run_interactive(EmulatorContext& emu) {
 
         // Run CPU for one frame
         uint64_t target = emu.cpu.cycles + CYCLES_PER_FRAME;
-        while (emu.cpu.cycles < target && !emu.cpu.halted && !emu.cpu.wfi) {
-            uint64_t batch = std::min<uint64_t>(emu.cpu.cycles + 10000, target);
-            emu.cpu.run(batch);
-            emu.tick_peripherals();
-            emu.cpu.check_exceptions();
+        while (emu.cpu.cycles < target && !emu.cpu.halted) {
+            if (emu.cpu.wfi) {
+                // Advance time in batches so peripherals can fire interrupts
+                uint64_t batch = std::min<uint64_t>(emu.cpu.cycles + 10000, target);
+                emu.cpu.cycles = batch;
+                emu.tick_peripherals();
+                emu.cpu.check_exceptions();
+            } else {
+                uint64_t batch = std::min<uint64_t>(emu.cpu.cycles + 10000, target);
+                emu.cpu.run(batch);
+                emu.tick_peripherals();
+                emu.cpu.check_exceptions();
+            }
         }
 
-        if (emu.cpu.wfi) {
-            emu.tick_peripherals();
-            emu.cpu.check_exceptions();
+        // Periodic status
+        if (emu.cpu.cycles - last_status >= 64'000'000) {
+            last_status = emu.cpu.cycles;
+            const uint16_t* fb = emu.display.framebuffer();
+            int nonzero = 0;
+            for (int i = 0; i < 240*240; i++) if (fb[i]) nonzero++;
+            fprintf(stderr, "[GUI] %.1fs  PC=0x%08X SP=0x%08X WFI=%d pixels=%d display=%d\n",
+                    emu.cpu.cycles / 64e6, emu.cpu.r[15], emu.cpu.r[13],
+                    emu.cpu.wfi ? 1 : 0, nonzero, emu.display.is_on() ? 1 : 0);
         }
 
         // Render display
@@ -604,8 +609,7 @@ static int run_interactive(EmulatorContext& emu) {
         SDL_RenderPresent(renderer);
 
         uint32_t frame_time = SDL_GetTicks() - frame_start;
-        uint32_t target_ms = emu.cpu.wfi ? 100 : 16;
-        if (frame_time < target_ms) SDL_Delay(target_ms - frame_time);
+        if (frame_time < 16) SDL_Delay(16 - frame_time);
     }
 
     SDL_DestroyTexture(texture);

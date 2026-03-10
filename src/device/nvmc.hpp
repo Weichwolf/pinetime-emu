@@ -34,7 +34,9 @@ public:
 
     void write(uint32_t addr, Width /*w*/, uint32_t val) override {
         switch (addr) {
-        case 0x504: config_ = val & 3; break;
+        case 0x504:
+            fprintf(stderr, "[NVMC] CONFIG %u → %u\n", config_, val & 3);
+            config_ = val & 3; break;
         case 0x508: // ERASEPAGE
             if (erase_enabled() && flash_) {
                 // Erase 4KB page

@@ -1,10 +1,12 @@
 #pragma once
 #include "../bus.hpp"
+#include "nvic.hpp"
 #include <array>
-#include <cstdio>
 #include <functional>
 
 namespace pt {
+
+class GPIOTE;
 
 // GPIO Port (P0) at 0x50000000, size 0x1000
 // 32 pins, each with individual configuration
@@ -15,21 +17,27 @@ class GPIO : public Device {
     uint32_t latch_ = 0;         // Latch (detect state)
     std::array<uint32_t, 32> pin_cnf_{}; // Per-pin config
 
-    // Pin change callback: called when output pins change
+    // Callbacks
     std::function<void(uint32_t old_out, uint32_t new_out)> on_out_change_;
+    GPIOTE* gpiote_ = nullptr;
 
     void update_out(uint32_t new_out) {
         if (new_out != out_ && on_out_change_) on_out_change_(out_, new_out);
         out_ = new_out;
     }
 
+    inline void notify_gpiote();
+
 public:
     void set_on_out_change(std::function<void(uint32_t, uint32_t)> cb) { on_out_change_ = cb; }
+    void set_gpiote(GPIOTE* g) { gpiote_ = g; }
+
     // External interface for simulating inputs
     void set_pin(uint8_t pin, bool high) {
         if (pin >= 32) return;
         if (high) in_ |= (1u << pin);
         else in_ &= ~(1u << pin);
+        notify_gpiote();
     }
 
     bool get_pin(uint8_t pin) const {
@@ -78,13 +86,62 @@ public:
 };
 
 // GPIOTE (GPIO Tasks and Events) at 0x40006000, size 0x1000
+// Monitors GPIO pin edges and generates interrupts
 class GPIOTE : public Device {
-    std::array<uint32_t, 8> config_{}; // Channel config
-    std::array<uint32_t, 8> ev_in_{};  // Input events
-    uint32_t ev_port_ = 0;
+    std::array<uint32_t, 8> config_{}; // Channel config (MODE, PSEL, POLARITY)
+    std::array<uint32_t, 8> ev_in_{};  // Input events per channel
+    uint32_t ev_port_ = 0;            // PORT event (SENSE-based)
     uint32_t inten_ = 0;
+    uint32_t pin_state_ = 0;          // Last observed GPIO pin state
+
+    GPIO* gpio_ = nullptr;
+    NVIC* nvic_ = nullptr;
+    uint32_t irq_ = 0;
+
+    void fire_irq() {
+        if (!nvic_) return;
+        bool pending = false;
+        for (int i = 0; i < 8; i++)
+            pending |= (inten_ & (1u << i)) && ev_in_[i];
+        pending |= (inten_ & (1u << 31)) && ev_port_;
+        if (pending) nvic_->set_pending(irq_);
+    }
 
 public:
+    void set_gpio(GPIO* gpio) { gpio_ = gpio; }
+    void set_nvic(NVIC* nvic, uint32_t irq) { nvic_ = nvic; irq_ = irq; }
+
+    // Called when any GPIO input pin changes (from GPIO::set_pin or output changes)
+    void pin_changed(uint32_t new_state) {
+        uint32_t old = pin_state_;
+        pin_state_ = new_state;
+        uint32_t rising = new_state & ~old;
+        uint32_t falling = old & ~new_state;
+
+        for (int ch = 0; ch < 8; ch++) {
+            uint32_t cfg = config_[ch];
+            uint8_t mode = cfg & 3;
+            if (mode != 1) continue; // Only Event mode
+            uint8_t pin = (cfg >> 8) & 0x1F;
+            uint8_t pol = (cfg >> 16) & 3;
+            bool triggered = false;
+            if (pol == 1) triggered = (rising & (1u << pin));   // LoToHi
+            else if (pol == 2) triggered = (falling & (1u << pin)); // HiToLo
+            else if (pol == 3) triggered = ((rising | falling) & (1u << pin)); // Toggle
+            if (triggered) {
+                ev_in_[ch] = 1;
+                fire_irq();
+            }
+        }
+
+        // PORT event: check SENSE config on PIN_CNF registers
+        // Simplified: fire PORT on any input change
+        if (rising | falling) {
+            ev_port_ = 1;
+            fire_irq();
+        }
+    }
+
     uint32_t read(uint32_t addr, Width /*w*/) override {
         if (addr >= 0x100 && addr < 0x120) return ev_in_[(addr - 0x100) / 4];
         if (addr == 0x17C) return ev_port_;
@@ -96,7 +153,7 @@ public:
     }
 
     void write(uint32_t addr, Width /*w*/, uint32_t val) override {
-        // TASKS_OUT[0..7]
+        // TASKS_OUT[0..7]: toggle pin (Task mode)
         if (addr < 0x020) return;
         // TASKS_SET[0..7]
         if (addr >= 0x030 && addr < 0x050) return;
@@ -111,5 +168,12 @@ public:
         if (addr == 0x308) { inten_ &= ~val; return; }
     }
 };
+
+inline void GPIO::notify_gpiote() {
+    if (gpiote_) {
+        uint32_t combined = (in_ & ~dir_) | (out_ & dir_);
+        gpiote_->pin_changed(combined);
+    }
+}
 
 } // namespace pt

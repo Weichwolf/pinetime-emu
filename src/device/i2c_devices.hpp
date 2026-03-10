@@ -2,6 +2,7 @@
 #include "twim.hpp"
 #include <cstdint>
 #include <cstring>
+#include <functional>
 
 namespace pt {
 
@@ -14,8 +15,14 @@ class CST816S : public I2CDevice {
     uint16_t touch_x_ = 0, touch_y_ = 0;
     uint8_t gesture_ = 0;
 
+    // Callback to toggle IRQ pin (active low)
+    std::function<void(bool)> irq_cb_;
+
 public:
     static constexpr uint8_t I2C_ADDR = 0x15;
+
+    // cb(true) = IRQ asserted (pin LOW), cb(false) = IRQ released (pin HIGH)
+    void set_irq_callback(std::function<void(bool)> cb) { irq_cb_ = cb; }
 
     void set_touch(bool touched, uint16_t x, uint16_t y, uint8_t gesture = 0) {
         touched_ = touched;
@@ -23,6 +30,7 @@ public:
         touch_y_ = y;
         gesture_ = gesture;
         update_regs();
+        if (irq_cb_) irq_cb_(touched); // Assert IRQ on touch, release on lift
     }
 
     void i2c_write(const uint8_t* data, uint32_t len) override {
@@ -88,7 +96,7 @@ public:
         regs_[0x12] = 0x00; regs_[0x13] = 0x00; // ACC_X
         regs_[0x14] = 0x00; regs_[0x15] = 0x00; // ACC_Y
         regs_[0x16] = 0x00; regs_[0x17] = 0x10; // ACC_Z (~4096)
-        regs_[0x1A] = 0x00; // INTERNAL_STATUS (OK)
+        regs_[0x1A] = 0x01; // INTERNAL_STATUS: config stream loaded
         regs_[0x2A] = 0x01; // STEP counter (low)
     }
 

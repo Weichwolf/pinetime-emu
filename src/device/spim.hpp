@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstring>
 #include <functional>
+#include <vector>
 
 namespace pt {
 
@@ -106,7 +107,9 @@ public:
     void write(uint32_t addr, Width /*w*/, uint32_t val) override {
         switch (addr) {
         case 0x010: // TASKS_START
-            if (val) do_transfer();
+            if (val) {
+                do_transfer();
+            }
             break;
         case 0x014: // TASKS_STOP
             if (val) { ev_stopped_ = 1; fire_irq(1); }
@@ -158,24 +161,26 @@ private:
         ev_ready_count_++;
     }
 
+    uint32_t transfer_count_ = 0;
+public:
+    uint32_t transfer_count() const { return transfer_count_; }
+private:
     void do_transfer() {
         if (!bus_ || enable_ != 7) return;
 
         ev_started_ = 1;
 
-        // Read TX data from memory
-        uint8_t tx_buf[256], rx_buf[256];
-        uint32_t tx_len = txd_maxcnt_ > 256 ? 256 : txd_maxcnt_;
-        uint32_t rx_len = rxd_maxcnt_ > 256 ? 256 : rxd_maxcnt_;
+        uint32_t tx_len = txd_maxcnt_;
+        uint32_t rx_len = rxd_maxcnt_;
+
+        // Dynamic buffers for DMA transfer (InfiniTime sends up to ~10KB chunks)
+        std::vector<uint8_t> tx_buf(tx_len), rx_buf(rx_len, orc_);
 
         for (uint32_t i = 0; i < tx_len; i++)
             tx_buf[i] = bus_->read8(txd_ptr_ + i);
-        memset(rx_buf, orc_, rx_len);
 
-        // Route to SPI device
-        if (callback_) callback_(tx_buf, tx_len, rx_buf, rx_len);
+        if (callback_) callback_(tx_buf.data(), tx_len, rx_buf.data(), rx_len);
 
-        // Write RX data back to memory
         for (uint32_t i = 0; i < rx_len; i++)
             bus_->write8(rxd_ptr_ + i, rx_buf[i]);
 
@@ -184,6 +189,7 @@ private:
         ev_endtx_ = 1;
         ev_endrx_ = 1;
         ev_end_ = 1;
+        transfer_count_++;
 
         fire_irq(6);  // END event = bit 6
         fire_irq(4);  // ENDTX event = bit 4  (for INTENSET mapping)

@@ -41,6 +41,17 @@ public:
     bool halted = false;
     bool wfi = false;
     bool irq_pending = false;  // Set when any interrupt state changes
+    bool breakpoint_hit = false;
+    uint32_t prev_pc_ = 0;
+
+    // Simple breakpoint table (up to 16)
+    static constexpr int MAX_BP = 16;
+    uint32_t breakpoints[MAX_BP]{};
+    int num_breakpoints = 0;
+
+    void add_breakpoint(uint32_t addr) {
+        if (num_breakpoints < MAX_BP) breakpoints[num_breakpoints++] = addr;
+    }
 
     explicit CPU(Bus* bus) : bus_(bus) {}
 

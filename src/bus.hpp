@@ -30,6 +30,11 @@ class Bus {
     uint32_t flash_size_ = 0;
     uint8_t* sram_ = nullptr;
     uint32_t sram_base_ = 0, sram_size_ = 0;
+public:
+    uint32_t watch_addr_ = 0;
+    const uint32_t* cpu_pc_ = nullptr;
+    const uint64_t* cpu_cy_ = nullptr;
+private:
 
 public:
     void map(uint32_t base, uint32_t size, Device* dev) {
@@ -58,6 +63,11 @@ public:
     }
 
     void write(uint32_t addr, Width w, uint32_t val) {
+        if (watch_addr_ && addr < watch_addr_ + 4 && addr + static_cast<uint32_t>(w) > watch_addr_) {
+            fprintf(stderr, "[WATCH] 0x%08X = 0x%X (w=%d) PC=0x%08X cy=%.2fM\n",
+                    addr, val, static_cast<int>(w), cpu_pc_ ? *cpu_pc_ : 0xDEAD,
+                    cpu_cy_ ? *cpu_cy_ / 1e6 : -1.0);
+        }
         // Fast path: SRAM
         if (addr >= sram_base_ && addr < sram_base_ + sram_size_) {
             write_mem(sram_ + (addr - sram_base_), w, val);

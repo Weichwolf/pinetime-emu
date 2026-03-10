@@ -33,6 +33,7 @@ class NVIC : public Device {
     uint32_t fpccr_ = 0xC0000000;  // FP Context Control (ASPEN=1, LSPEN=1)
     uint32_t fpcar_ = 0;           // FP Context Address
     uint32_t fpdscr_ = 0;          // FP Default Status Control
+    const uint32_t* cpu_pc_ = nullptr;
 
     // SysTick
     uint32_t syst_csr_ = 0;    // Control and Status
@@ -41,6 +42,7 @@ class NVIC : public Device {
     uint64_t last_tick_ = 0;
 
 public:
+    void set_cpu_pc(const uint32_t* pc) { cpu_pc_ = pc; }
     void set_irq_pending_flag(bool* flag) { irq_pending_ = flag; }
     void signal_irq() { if (irq_pending_) *irq_pending_ = true; }
 
@@ -273,11 +275,17 @@ private:
             if (val & (1u << 25)) clear_sys_pending(15); // PENDSTCLR
             break;
         case 0x08:
-            vtor_ = val & 0xFFFFFF80; break;
+            vtor_ = val & 0xFFFFFF80;
+            fprintf(stderr, "[NVIC] VTOR = 0x%08X (raw=0x%08X) PC=0x%08X\n",
+                    vtor_, val, cpu_pc_ ? *cpu_pc_ : 0xDEAD);
+            break;
         case 0x0C:
             if ((val >> 16) == 0x05FA) {
                 aircr_ = (val & 0x0700) | 0xFA050000;
-                if (val & 0x04) { sysresetreq_ = true; }
+                if (val & 0x04) {
+                    sysresetreq_ = true;
+                    fprintf(stderr, "[NVIC] SYSRESETREQ at PC=0x%08X\n", cpu_pc_ ? *cpu_pc_ : 0xDEAD);
+                }
             }
             break;
         case 0x10: scr_ = val & 0x1E; break;

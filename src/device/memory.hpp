@@ -65,7 +65,20 @@ public:
 
     void write(uint32_t addr, Width w, uint32_t val) override {
         // Flash writes only work when NVMC config=1 (write enabled)
-        if (!nvmc_config_ || *nvmc_config_ != 1) return;
+        if (!nvmc_config_ || *nvmc_config_ != 1) {
+            static int drop_count = 0;
+            if (drop_count < 10)
+                fprintf(stderr, "[FLASH] Write DROPPED addr=0x%08X val=0x%X (NVMC config=%u)\n",
+                        addr, val, nvmc_config_ ? *nvmc_config_ : 99);
+            drop_count++;
+            return;
+        }
+        {
+            static int ok_count = 0;
+            if (ok_count < 20)
+                fprintf(stderr, "[FLASH] Write OK addr=0x%08X val=0x%08X\n", addr, val);
+            ok_count++;
+        }
         if (addr + static_cast<uint32_t>(w) > mem_.size()) return;
         // Flash write: can only clear bits (AND semantics)
         switch (w) {

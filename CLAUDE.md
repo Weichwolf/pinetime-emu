@@ -126,11 +126,12 @@ Tests terminieren via BKPT. R0=0 = PASS, R0=N = Test N fehlgeschlagen.
 **PineTime**: ST7789 (SPI→Framebuffer→SDL2), CST816S (Touch→Maus), HRS3300, BMA4xx. Ext. SPI Flash 4MB.
 **Firmware**: `firmware/merged-internal.bin` — InfiniTime 1.14.1 + MCUBoot Bootloader.
 
-**InfiniTime Boot**: ✓ Erfolgreich. Display ON, Watchface gerendert (23k/57k Pixel), FreeRTOS stabil (10s Laufzeit, Scheduler aktiv, Tasks blockiert auf Events).
+**InfiniTime Boot**: ✓ Erfolgreich. MCUBoot → InfiniTime Handoff, Display ON, Digital Watchface gerendert (8k/58k Pixel), FreeRTOS stabil (10s Laufzeit, Scheduler aktiv, Tasks laufen).
 
 **Offen**:
 - Performance-Optimierung (aktuell ~1x Echtzeit)
 - FPU Lazy Stacking (EXC_RETURN bit[4]) in exception_entry/return
+- Watchface zeigt 00:00 (kein RTC time-of-day)
 
 ## Workflow
 
