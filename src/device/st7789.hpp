@@ -39,7 +39,7 @@ class ST7789 {
 public:
     static constexpr int WIDTH = 240;
     static constexpr int HEIGHT = 240;
-    static constexpr int ROW_OFFSET = 80; // PineTime Y offset
+    static constexpr int ROW_OFFSET = 0; // InfiniTime addresses rows 0-239 directly
 
     // Returns pointer to visible area (row 80 onward)
     const uint16_t* framebuffer() const { return fb_.data() + ROW_OFFSET * FB_W; }
