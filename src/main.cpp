@@ -261,6 +261,8 @@ struct EmulatorContext {
             gpio.set_pin(PineDef::TOUCH_IRQ, !active); // Active low
         });
         twim1.attach(pt::CST816S::I2C_ADDR, &touch);
+        hrs.set_cycles(&cpu.cycles);
+        bma.set_cycles(&cpu.cycles);
         twim1.attach(pt::HRS3300::I2C_ADDR, &hrs);
         twim1.attach(pt::BMA4xx::I2C_ADDR, &bma);
 
