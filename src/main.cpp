@@ -13,6 +13,10 @@
 #include "device/i2c_devices.hpp"
 #include "device/rng.hpp"
 #include "device/ecb.hpp"
+#include "device/radio.hpp"
+#include "device/ppi.hpp"
+#include "device/saadc.hpp"
+#include "device/temp.hpp"
 #include <SDL2/SDL.h>
 #include <cstdio>
 #include <cstdlib>
@@ -119,15 +123,14 @@ struct EmulatorContext {
     pt::TWIM twim1;        // Sensors
     pt::NVMC nvmc;
     pt::WDT wdt;
-    StubDevice radio_stub;
-    StubDevice ppi_stub;
-    StubDevice saadc_stub;
-    StubDevice temp_stub;
+    pt::Radio radio;
+    pt::PPI ppi;
+    pt::SAADC saadc;
+    pt::TEMP temp;
     pt::RNG rng;
     pt::ECB ecb;
     StubDevice fpu_stub;
     StubDevice ccm_stub;
-    StubDevice bprot_stub;
     StubDevice swi0_stub, swi1_stub, swi2_stub, swi3_stub, swi4_stub, swi5_stub;
     StubDevice stub_device;
     DWT dwt;
@@ -322,17 +325,21 @@ struct EmulatorContext {
 
         // nRF52 peripherals
         bus.map(0x40000000, 0x1000, &clock_power); // CLOCK + POWER
-        bus.map(0x40001000, 0x1000, &radio_stub);  // RADIO
+        bus.map(0x40001000, 0x1000, &radio);        // RADIO
         bus.map(0x40003000, 0x1000, &spim0);       // SPI0/TWI0 — used as SPI for LCD
         bus.map(0x40004000, 0x1000, &twim1);       // SPI1/TWI1 — used as TWI for sensors
         bus.map(0x40006000, 0x1000, &gpiote);      // GPIOTE
-        bus.map(0x40007000, 0x1000, &saadc_stub);  // SAADC
+        bus.map(0x40007000, 0x1000, &saadc);        // SAADC
         bus.map(0x40008000, 0x1000, &timer0);      // TIMER0
         bus.map(0x40009000, 0x1000, &timer1);      // TIMER1
         bus.map(0x4000A000, 0x1000, &timer2);      // TIMER2
         bus.map(0x4000B000, 0x1000, &rtc0);        // RTC0
-        bus.map(0x4000C000, 0x1000, &temp_stub);   // TEMP
+        bus.map(0x4000C000, 0x1000, &temp);         // TEMP
         bus.map(0x4000D000, 0x1000, &rng);         // RNG
+        radio.set_nvic(&nvic, 1);
+        saadc.set_bus(&bus);
+        saadc.set_nvic(&nvic, 7);
+        temp.set_nvic(&nvic, 12);
         rng.set_nvic(&nvic, 13);
         bus.map(0x4000E000, 0x1000, &ecb);         // ECB
         ecb.set_bus(&bus);
@@ -346,8 +353,8 @@ struct EmulatorContext {
         bus.map(0x40017000, 0x1000, &swi3_stub);    // SWI3/EGU3
         bus.map(0x40018000, 0x1000, &swi4_stub);    // SWI4/EGU4
         bus.map(0x40019000, 0x1000, &swi5_stub);    // SWI5/EGU5
-        bus.map(0x4001F000, 0x1000, &bprot_stub);   // BPROT
-        bus.map(0x40020000, 0x1000, &ppi_stub);    // PPI
+        bus.map(0x4001F000, 0x1000, &ppi);            // PPI (at BPROT addr for nRF52)
+        bus.map(0x40020000, 0x1000, &stub_device);  // Reserved
         bus.map(0x40024000, 0x1000, &rtc2);        // RTC2
         bus.map(0x4002A000, 0x1000, &fpu_stub);    // FPU access port
         bus.map(0x50000000, 0x1000, &gpio);         // GPIO P0
@@ -426,6 +433,7 @@ struct EmulatorContext {
         rtc1.tick(cpu.cycles);
         rtc2.tick(cpu.cycles);
         rng.tick(cpu.cycles);
+        temp.tick(cpu.cycles);
     }
 };
 

@@ -2,6 +2,7 @@
 #include "bus.hpp"
 #include <array>
 #include <cstdint>
+#include <cstring>
 
 namespace pt {
 
@@ -21,6 +22,20 @@ public:
     uint32_t basepri = 0;
     uint32_t faultmask = 0;
     uint32_t control = 0;          // [1]=SPSEL, [0]=nPRIV
+
+    // FPU (VFPv4-D16)
+    std::array<uint32_t, 32> s{};  // S0-S31 (single-precision, also accessible as D0-D15)
+    uint32_t fpscr = 0;           // FP Status and Control
+
+    float& sf(int n) { return reinterpret_cast<float&>(s[n]); }
+    double df(int n) { // Read Dn (pair of S2n, S2n+1)
+        uint64_t v = s[n*2] | (uint64_t(s[n*2+1]) << 32);
+        double d; memcpy(&d, &v, 8); return d;
+    }
+    void set_df(int n, double v) {
+        uint64_t u; memcpy(&u, &v, 8);
+        s[n*2] = u; s[n*2+1] = u >> 32;
+    }
 
     uint64_t cycles = 0;
     bool halted = false;
@@ -141,6 +156,11 @@ private:
 
     void exception_entry(uint32_t exception_num);
     void exception_return(uint32_t exc_return);
+    void exec_vfp(uint16_t hw1, uint16_t hw2);
+    void exec_vfp_ldst(uint16_t hw1, uint16_t hw2);
+    void exec_vfp_dp(uint32_t inst);
+    void exec_vfp_misc_single(uint32_t inst, uint8_t vd, uint8_t vm);
+    void exec_vfp_misc_double(uint32_t inst, uint8_t vd, uint8_t vm);
 
     void branch_to(uint32_t addr) { r[15] = addr & ~1u; }
 };

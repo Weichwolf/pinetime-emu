@@ -1,5 +1,6 @@
 #include "cpu.hpp"
 #include "device/nvic.hpp"
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 
@@ -858,9 +859,8 @@ void CPU::exec_thumb32_01(uint16_t hw1, uint16_t hw2, uint8_t op2) {
         // Data processing (shifted register)
         exec_thumb32_dp_shifted_reg(hw1, hw2);
     } else {
-        // Coprocessor — not implemented for Cortex-M4 basic
-        fprintf(stderr, "[CPU] Coprocessor hw1=%04X hw2=%04X at 0x%08X IT=%02X Z=%d LR=%08X\n",
-                hw1, hw2, r[15], (uint8_t)(((xpsr>>8)&0xFC)|((xpsr>>25)&3)), flag_z()?1:0, r[14]);
+        // Coprocessor / FP (op1=01, op2 bit 6 set)
+        exec_vfp_ldst(hw1, hw2);
     }
 }
 
@@ -895,7 +895,7 @@ void CPU::exec_thumb32_11(uint16_t hw1, uint16_t hw2, uint8_t op2) {
     } else if ((op2 & 0x78) == 0x38) {
         exec_thumb32_long_multiply(hw1, hw2);
     } else if (op2 & 0x40) {
-        fprintf(stderr, "[CPU] Coprocessor at 0x%08X\n", r[15]);
+        exec_vfp(hw1, hw2);
     } else {
         fprintf(stderr, "[CPU] Unimpl Thumb-32 op1=11 op2=0x%02X at 0x%08X\n", op2, r[15]);
     }
@@ -1653,6 +1653,331 @@ void CPU::exec_thumb32_long_multiply(uint16_t hw1, uint16_t hw2) {
         fprintf(stderr, "[CPU] Unimpl long mul/div op1=%d at 0x%08X\n", op1, r[15]);
         break;
     }
+}
+
+// ============================================================================
+// VFP (Floating-Point) Instructions — VFPv4-D16
+// ============================================================================
+
+// VFP data processing (CDP/CDP2, MCR/MRC) — op1=11, op2 bit 6 set
+void CPU::exec_vfp(uint16_t hw1, uint16_t hw2) {
+    uint8_t opc1 = (hw1 >> 4) & 0xF;
+    uint8_t cp = (hw2 >> 8) & 0xF;
+
+    // VMOV between ARM core and single-precision (MCR/MRC, cp10)
+    if (cp == 10 && (opc1 & 0xE) == 0xE) {
+        uint8_t rt = (hw1 & 0xF);
+        // Re-decode: this is VMRS/VMSR or VMOV
+        // MRC: bit 20 set (read from coproc to ARM)
+        // MCR: bit 20 clear (write from ARM to coproc)
+        bool to_arm = hw1 & 0x10; // L bit for MRC
+        uint8_t crn = (hw2 >> 16) & 0xF;
+
+        if (opc1 == 0xF && to_arm) {
+            // VMRS: Move FP status to ARM register
+            if (crn == 1) { // FPSCR
+                if (rt == 15) {
+                    // VMRS APSR_nzcv, FPSCR — copy N,Z,C,V from FPSCR to xPSR
+                    xpsr = (xpsr & 0x0FFFFFFF) | (fpscr & 0xF0000000);
+                } else {
+                    r[rt] = fpscr;
+                }
+            }
+            return;
+        }
+        if (opc1 == 0xE && !to_arm) {
+            // VMSR: Move ARM register to FP status
+            if (crn == 1) fpscr = r[rt];
+            return;
+        }
+    }
+
+    // Properly decode VFP data processing and VMOV instructions
+    // Re-parse the full 32-bit instruction
+    uint32_t inst = (hw1 << 16) | hw2;
+
+    // VMOV between ARM core register and single-precision
+    if ((inst & 0x0F100F10) == 0x0E000A10) {
+        bool to_arm = inst & (1<<20);
+        uint8_t rt2 = (inst >> 12) & 0xF;
+        uint8_t vn2 = ((inst >> 16) & 0xF) | ((inst & (1<<7)) ? 16 : 0);
+        if (to_arm) r[rt2] = s[vn2];
+        else s[vn2] = r[rt2];
+        return;
+    }
+
+    // VFP CDP (data processing)
+    if ((inst & 0x0F000E10) == 0x0E000A00) {
+        exec_vfp_dp(inst);
+        return;
+    }
+
+    fprintf(stderr, "[CPU] Unimpl VFP hw1=%04X hw2=%04X at 0x%08X\n", hw1, hw2, r[15]);
+}
+
+// VFP load/store and 64-bit transfers (op1=01, coprocessor)
+void CPU::exec_vfp_ldst(uint16_t hw1, uint16_t hw2) {
+    uint32_t inst = (hw1 << 16) | hw2;
+    uint8_t cp = (hw2 >> 8) & 0xF;
+
+    if (cp != 10 && cp != 11) {
+        // Not FP coprocessor
+        fprintf(stderr, "[CPU] Coprocessor cp%d hw1=%04X hw2=%04X at 0x%08X\n",
+                cp, hw1, hw2, r[15]);
+        return;
+    }
+
+    bool is_dp = (cp == 11);
+    uint8_t p = (inst >> 24) & 1;
+    uint8_t u = (inst >> 23) & 1;
+    uint8_t w = (inst >> 21) & 1;
+    uint8_t l = (inst >> 20) & 1;
+    uint8_t rn = (inst >> 16) & 0xF;
+    uint8_t imm8 = inst & 0xFF;
+    uint32_t offset = imm8 * 4;
+
+    if (is_dp) {
+        uint8_t vd = ((inst >> 12) & 0xF) | ((inst & (1<<22)) ? 16 : 0);
+        vd /= 2; // For double, Dd index. Actually: D:Vd = (inst[22]<<4)|(inst[15:12])
+        // Re-decode properly for double
+        uint8_t d = (inst >> 22) & 1;
+        uint8_t vd_raw = (inst >> 12) & 0xF;
+        vd = (d << 4) | vd_raw;
+        // vd is now the Dd register number
+
+        if (p == 1 && w == 0) {
+            // VLDR/VSTR (immediate, no writeback)
+            uint32_t base = (rn == 15) ? ((r[15] + 4) & ~3u) : r[rn];
+            uint32_t addr = u ? base + offset : base - offset;
+            if (l) { // VLDR
+                s[vd*2]   = bus_->read32(addr);
+                s[vd*2+1] = bus_->read32(addr + 4);
+            } else { // VSTR
+                bus_->write32(addr, s[vd*2]);
+                bus_->write32(addr + 4, s[vd*2+1]);
+            }
+            return;
+        }
+        if (p == 0 || w == 1) {
+            // VLDM/VSTM (multiple)
+            uint32_t base = r[rn];
+            if (!u) base -= offset; // Decrement before
+            uint32_t addr = u ? base : base;
+            uint8_t regs = imm8 / 2;
+            for (int i = 0; i < regs && (vd + i) < 16; i++) {
+                if (l) {
+                    s[(vd+i)*2]   = bus_->read32(addr);
+                    s[(vd+i)*2+1] = bus_->read32(addr + 4);
+                } else {
+                    bus_->write32(addr, s[(vd+i)*2]);
+                    bus_->write32(addr + 4, s[(vd+i)*2+1]);
+                }
+                addr += 8;
+            }
+            if (w) {
+                if (u) r[rn] = base + offset;
+                else r[rn] = base - offset;
+                if (rn == 13) { if (control & 2) psp = r[13]; else msp = r[13]; }
+            }
+            return;
+        }
+    } else {
+        // Single-precision
+        uint8_t d = (inst >> 22) & 1;
+        uint8_t vd_raw = (inst >> 12) & 0xF;
+        uint8_t vd = (vd_raw << 1) | d;
+
+        if (p == 1 && w == 0) {
+            // VLDR/VSTR single
+            uint32_t base = (rn == 15) ? ((r[15] + 4) & ~3u) : r[rn];
+            uint32_t addr = u ? base + offset : base - offset;
+            if (l) s[vd] = bus_->read32(addr);
+            else bus_->write32(addr, s[vd]);
+            return;
+        }
+        if (p == 0 || w == 1) {
+            // VLDM/VSTM single
+            uint32_t base = r[rn];
+            if (!u) base -= offset;
+            uint32_t addr = base;
+            for (int i = 0; i < imm8 && (vd + i) < 32; i++) {
+                if (l) s[vd+i] = bus_->read32(addr);
+                else bus_->write32(addr, s[vd+i]);
+                addr += 4;
+            }
+            if (w) {
+                if (u) r[rn] = base + offset;
+                else r[rn] = base;
+                if (rn == 13) { if (control & 2) psp = r[13]; else msp = r[13]; }
+            }
+            return;
+        }
+    }
+
+    // VMOV between two ARM core regs and two single-precision / one double
+    if (cp == 10 && p == 0 && !w) {
+        uint8_t rt = (inst >> 12) & 0xF;
+        uint8_t rt2 = (inst >> 16) & 0xF;
+        uint8_t vm = ((inst & 0xF) << 1) | ((inst >> 5) & 1);
+        if (l) { r[rt] = s[vm]; r[rt2] = s[vm+1]; }
+        else   { s[vm] = r[rt]; s[vm+1] = r[rt2]; }
+        return;
+    }
+    if (cp == 11 && p == 0 && !w) {
+        uint8_t rt = (inst >> 12) & 0xF;
+        uint8_t rt2 = (inst >> 16) & 0xF;
+        uint8_t vm = ((inst >> 5) & 1) << 4 | (inst & 0xF);
+        if (l) { r[rt] = s[vm*2]; r[rt2] = s[vm*2+1]; }
+        else   { s[vm*2] = r[rt]; s[vm*2+1] = r[rt2]; }
+        return;
+    }
+
+    fprintf(stderr, "[CPU] Unimpl VFP ldst hw1=%04X hw2=%04X at 0x%08X\n", hw1, hw2, r[15]);
+}
+
+// VFP data processing (single-precision operations)
+void CPU::exec_vfp_dp(uint32_t inst) {
+    bool is_dp = inst & 0x100;
+    uint8_t opc1 = (inst >> 20) & 0xF;
+    uint8_t opc3 = (inst >> 6) & 0x3;
+
+    if (!is_dp) {
+        // Single-precision
+        uint8_t d = (inst >> 22) & 1;
+        uint8_t vd = (((inst >> 12) & 0xF) << 1) | d;
+        uint8_t n = (inst >> 7) & 1;
+        uint8_t vn = (((inst >> 16) & 0xF) << 1) | n;
+        uint8_t m = (inst >> 5) & 1;
+        uint8_t vm = ((inst & 0xF) << 1) | m;
+
+        float a = sf(vn), b = sf(vm);
+        float result;
+        switch (opc1 & 0xB) { // Remove bit 2 (opc1[2] is part of some encodings)
+        case 0x0: // VMLA/VMLS
+            result = (opc1 & 4) ? sf(vd) - a*b : sf(vd) + a*b;
+            sf(vd) = result; return;
+        case 0x1: // VNMLA/VNMLS/VNMUL
+            if (opc3 & 1) { sf(vd) = -(a*b); return; } // VNMUL
+            result = (opc1 & 4) ? -(sf(vd) - a*b) : -(sf(vd) + a*b);
+            sf(vd) = result; return;
+        case 0x2: // VMUL/VNMUL
+            sf(vd) = (opc1 & 4) ? a*b : a*b; // bit 2 selects VMUL vs VNMUL
+            return;
+        case 0x3: // VADD/VSUB
+            sf(vd) = (opc1 & 4) ? a - b : a + b; return;
+        case 0x8: // VDIV
+            sf(vd) = a / b; return;
+        case 0xB: // Misc: VMOV, VABS, VNEG, VSQRT, VCMP, VCVT
+            exec_vfp_misc_single(inst, vd, vm);
+            return;
+        }
+    } else {
+        // Double-precision
+        uint8_t d = (inst >> 22) & 1;
+        uint8_t vd = (d << 4) | ((inst >> 12) & 0xF);
+        uint8_t n = (inst >> 7) & 1;
+        uint8_t vn = (n << 4) | ((inst >> 16) & 0xF);
+        uint8_t m = (inst >> 5) & 1;
+        uint8_t vm_idx = (m << 4) | (inst & 0xF);
+
+        double a = df(vn), b = df(vm_idx);
+        switch (opc1 & 0xB) {
+        case 0x0: set_df(vd, (opc1&4) ? df(vd)-a*b : df(vd)+a*b); return;
+        case 0x2: set_df(vd, a*b); return;
+        case 0x3: set_df(vd, (opc1&4) ? a-b : a+b); return;
+        case 0x8: set_df(vd, a/b); return;
+        case 0xB: exec_vfp_misc_double(inst, vd, vm_idx); return;
+        }
+    }
+    fprintf(stderr, "[CPU] Unimpl VFP dp opc1=%d at 0x%08X\n", opc1, r[15]);
+}
+
+void CPU::exec_vfp_misc_single(uint32_t inst, uint8_t vd, uint8_t vm) {
+    uint8_t opc2 = (inst >> 16) & 0xF;
+    uint8_t opc3 = (inst >> 6) & 0x3;
+
+    switch (opc2) {
+    case 0x0: // VMOV imm, VMOV reg, VABS
+        if (opc3 & 1) sf(vd) = fabsf(sf(vm)); // VABS
+        else { s[vd] = s[vm]; } // VMOV reg
+        return;
+    case 0x1: // VNEG, VSQRT
+        if (opc3 & 1) sf(vd) = sqrtf(sf(vm)); // VSQRT
+        else sf(vd) = -sf(vm); // VNEG
+        return;
+    case 0x4: case 0x5: // VCMP, VCMPE
+    {
+        float a = sf(vd);
+        float b = (opc2 & 1) ? 0.0f : sf(vm);
+        uint32_t nzcv = 0;
+        if (a == b) nzcv = 0x6000; // Z=1, C=1
+        else if (a < b) nzcv = 0x8000; // N=1
+        else nzcv = 0x2000; // C=1
+        fpscr = (fpscr & 0x0FFFFFFF) | (nzcv << 16);
+        return;
+    }
+    case 0x7: // VCVT between double and single
+        if (opc3 & 1) {
+            // VCVT.F64.F32 Dd, Sm → promote single to double
+            set_df(vd / 2, (double)sf(vm));
+        }
+        return;
+    case 0x8: // VCVT.F32.S32/U32 (int to float)
+        if (opc3 & 1) sf(vd) = (float)(int32_t)s[vm];  // Signed
+        else sf(vd) = (float)s[vm];                     // Unsigned
+        return;
+    case 0xC: case 0xD: // VCVT.U32.F32 / VCVT.S32.F32 (float to int)
+    {
+        float v = sf(vm);
+        if (opc2 & 1) s[vd] = (int32_t)v;   // Signed (round toward zero for VCVT)
+        else s[vd] = (uint32_t)v;            // Unsigned
+        return;
+    }
+    }
+    fprintf(stderr, "[CPU] Unimpl VFP misc single opc2=%d opc3=%d at 0x%08X\n",
+            opc2, opc3, r[15]);
+}
+
+void CPU::exec_vfp_misc_double(uint32_t inst, uint8_t vd, uint8_t vm) {
+    uint8_t opc2 = (inst >> 16) & 0xF;
+    uint8_t opc3 = (inst >> 6) & 0x3;
+
+    switch (opc2) {
+    case 0x0:
+        if (opc3 & 1) set_df(vd, fabs(df(vm)));
+        else set_df(vd, df(vm)); // VMOV
+        return;
+    case 0x1:
+        if (opc3 & 1) set_df(vd, sqrt(df(vm)));
+        else set_df(vd, -df(vm));
+        return;
+    case 0x4: case 0x5: {
+        double a = df(vd);
+        double b = (opc2 & 1) ? 0.0 : df(vm);
+        uint32_t nzcv = 0;
+        if (a == b) nzcv = 0x6000;
+        else if (a < b) nzcv = 0x8000;
+        else nzcv = 0x2000;
+        fpscr = (fpscr & 0x0FFFFFFF) | (nzcv << 16);
+        return;
+    }
+    case 0x7: // VCVT.F32.F64 Sd, Dm → demote double to single
+        if (!(opc3 & 1)) {
+            sf(vd) = (float)df(vm);
+        }
+        return;
+    case 0x8:
+        if (opc3 & 1) set_df(vd, (double)(int32_t)s[vm*2]);
+        else set_df(vd, (double)s[vm*2]);
+        return;
+    case 0xC: case 0xD: {
+        double v = df(vm);
+        if (opc2 & 1) s[vd*2] = (int32_t)v;
+        else s[vd*2] = (uint32_t)v;
+        return;
+    }
+    }
+    fprintf(stderr, "[CPU] Unimpl VFP misc double opc2=%d at 0x%08X\n", opc2, r[15]);
 }
 
 } // namespace pt

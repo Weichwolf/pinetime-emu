@@ -25,6 +25,10 @@ pinetime-emu/
 │       ├── spim.hpp          # SPIM mit EasyDMA + SpiCallback
 │       ├── twim.hpp          # TWIM mit EasyDMA + I2CDevice-Interface
 │       ├── nvmc.hpp          # Flash Controller (CONFIG/ERASEPAGE)
+│       ├── radio.hpp         # BLE Radio (TX instant, RX stub)
+│       ├── ppi.hpp           # PPI (Programmable Peripheral Interconnect)
+│       ├── saadc.hpp         # SAADC (ADC, simuliert Batteriespannung)
+│       ├── temp.hpp          # TEMP (Die-Temperatur, 21°C)
 │       ├── rng.hpp           # Random Number Generator (VALRDY events)
 │       ├── ecb.hpp           # AES-128 ECB Encryption
 │       ├── wdt.hpp           # Watchdog (akzeptiert Reload, kein Timeout)
@@ -74,6 +78,8 @@ Thumb-2 ISA, organisiert in Gruppen:
 | 32-bit op1=01 | `exec_thumb32_01()` | LDM/STM, LDRD/STRD, LDREX/STREX, TBB/TBH, DP shifted reg |
 | 32-bit op1=10 | `exec_thumb32_10()` | DP modified imm, DP plain imm (MOVW/MOVT), Branches (B.W/BL), MSR/MRS |
 | 32-bit op1=11 | `exec_thumb32_11()` | LDR.W/STR.W, CLZ/REV/RBIT, MUL/DIV, SMULL/UMULL |
+| VFP Data Proc | `exec_vfp()` / `exec_vfp_dp()` | VMOV, VADD, VSUB, VMUL, VDIV, VCMP, VCVT, VABS, VNEG, VSQRT |
+| VFP Load/Store | `exec_vfp_ldst()` | VLDR, VSTR, VLDM, VSTM |
 
 **PC-Konvention**: `r[15]` = Adresse der aktuellen Instruktion. Lesen als Operand gibt `r[15] + 4`.
 **IT-Blöcke**: Condition-Check vor Execution, `advance_it()` danach. 16-bit Instruktionen setzen keine Flags in IT.
@@ -101,9 +107,13 @@ Thumb-2 ISA, organisiert in Gruppen:
 | 0x4001E000 | NVMC | nvmc.hpp |
 | 0x50000000 | GPIO P0 | gpio.hpp |
 | 0xE000E000 | SCS (NVIC+SCB+SysTick) | nvic.hpp |
+| 0x40001000 | RADIO (BLE) | radio.hpp |
+| 0x40007000 | SAADC (ADC) | saadc.hpp |
+| 0x4000C000 | TEMP (Die-Temperatur) | temp.hpp |
 | 0x4000D000 | RNG | rng.hpp |
 | 0x4000E000 | ECB (AES-128) | ecb.hpp |
-| Stubs | Radio, PPI, SAADC, TEMP, FPU | main.cpp |
+| 0x4001F000 | PPI | ppi.hpp |
+| Stubs | FPU access port, CCM/AAR | main.cpp |
 
 ## Test-Konvention
 
@@ -111,17 +121,16 @@ Tests terminieren via BKPT. R0=0 = PASS, R0=N = Test N fehlgeschlagen.
 
 ## Status
 
-**CPU**: Thumb-2 Core funktional (16-bit + 32-bit, IT-Blöcke, Exceptions, interrupt-driven scheduling). 10 Basistests bestehen.
-**Peripherals**: Alle für InfiniTime nötigen nRF52-Peripherals implementiert (RNG, ECB, NVMC, SysTick, NVIC, SPIm, TWIm, Timers, RTCs).
-**PineTime**: ST7789 (SPI→Framebuffer→SDL2), CST816S (Touch→Maus), HRS3300, BMA4xx.
+**CPU**: Thumb-2 Core + VFPv4-D16 FPU (single+double precision). IT-Blöcke, Exceptions, interrupt-driven scheduling. 10 Basistests bestehen.
+**Peripherals**: Alle nRF52-Peripherals implementiert: Radio, PPI, SAADC, TEMP, RNG, ECB, NVMC, SysTick, NVIC, SPIM, TWIM, Timers, RTCs, GPIO/GPIOTE, WDT, CLOCK/POWER.
+**PineTime**: ST7789 (SPI→Framebuffer→SDL2), CST816S (Touch→Maus), HRS3300, BMA4xx. Ext. SPI Flash 4MB.
 **Firmware**: `firmware/merged-internal.bin` — InfiniTime 1.14.1 + MCUBoot Bootloader.
 
 **InfiniTime Boot**: ✓ Erfolgreich. Display ON, Watchface gerendert (23k/57k Pixel), FreeRTOS stabil (10s Laufzeit, Scheduler aktiv, Tasks blockiert auf Events).
 
 **Offen**:
-- Ext. SPI Flash (4MB)
-- FPU (Cortex-M4F Hard-Float)
 - Performance-Optimierung (aktuell ~1x Echtzeit)
+- FPU Lazy Stacking (EXC_RETURN bit[4]) in exception_entry/return
 
 ## Workflow
 

@@ -29,6 +29,10 @@ class NVIC : public Device {
     std::array<uint8_t, 12> shpr_{}; // System Handler Priority (4-11 mapped to indices 0-7)
     uint32_t shcsr_ = 0;
     uint32_t icsr_ = 0;
+    uint32_t cpacr_ = 0;   // Coprocessor Access Control
+    uint32_t fpccr_ = 0xC0000000;  // FP Context Control (ASPEN=1, LSPEN=1)
+    uint32_t fpcar_ = 0;           // FP Context Address
+    uint32_t fpdscr_ = 0;          // FP Default Status Control
 
     // SysTick
     uint32_t syst_csr_ = 0;    // Control and Status
@@ -142,8 +146,10 @@ public:
         if (addr >= 0x010 && addr <= 0x01C) return read_systick(addr - 0x010);
         // NVIC: 0x100-0x4FF
         if (addr >= 0x100 && addr < 0x500) return read_nvic(addr - 0x100);
-        // SCB: 0xD00-0xD3F
-        if (addr >= 0xD00 && addr < 0xD40) return read_scb(addr - 0xD00);
+        // SCB: 0xD00-0xD8C (includes CPACR at 0xD88)
+        if (addr >= 0xD00 && addr < 0xD90) return read_scb(addr - 0xD00);
+        // FP extension: 0xF34-0xF3C
+        if (addr >= 0xF34 && addr <= 0xF3C) return read_scb(addr - 0xD00);
         // STIR: 0xF00
         if (addr == 0xF00) return 0;
         return 0;
@@ -152,7 +158,8 @@ public:
     void write(uint32_t addr, Width /*w*/, uint32_t val) override {
         if (addr >= 0x010 && addr <= 0x01C) { write_systick(addr - 0x010, val); return; }
         if (addr >= 0x100 && addr < 0x500) { write_nvic(addr - 0x100, val); return; }
-        if (addr >= 0xD00 && addr < 0xD40) { write_scb(addr - 0xD00, val); return; }
+        if (addr >= 0xD00 && addr < 0xD90) { write_scb(addr - 0xD00, val); return; }
+        if (addr >= 0xF34 && addr <= 0xF3C) { write_scb(addr - 0xD00, val); return; }
         if (addr == 0xF00) { set_pending(val & 0xFF); return; } // STIR
     }
 
@@ -244,9 +251,16 @@ private:
         case 0x34: return 0; // MMFAR
         case 0x38: return 0; // BFAR
         case 0x3C: return 0; // AFSR
+        case 0x88: return cpacr_;
+        // FP extension registers (at 0xF34, 0xF38, 0xF3C offset from E000ED00)
+        case 0x34 + 0x100: return fpccr_;
+        case 0x38 + 0x100: return fpcar_;
+        case 0x3C + 0x100: return fpdscr_;
         }
         return 0;
     }
+
+    bool fpu_enabled() const { return (cpacr_ & 0x00F00000) != 0; }
 
     void write_scb(uint32_t off, uint32_t val) {
         switch (off) {
@@ -278,6 +292,10 @@ private:
             shpr_[8] = val; shpr_[9] = val>>8; shpr_[10] = val>>16; shpr_[11] = val>>24;
             break;
         case 0x24: shcsr_ = val; break;
+        case 0x88: cpacr_ = val; break;
+        case 0x34 + 0x100: fpccr_ = val; break;
+        case 0x38 + 0x100: fpcar_ = val; break;
+        case 0x3C + 0x100: fpdscr_ = val; break;
         }
     }
 };
