@@ -18,6 +18,8 @@ class NVIC : public Device {
 
     // System exception pending (bits 2-15: NMI, HardFault, ..., PendSV, SysTick)
     uint16_t sys_pending_ = 0;
+    bool sysresetreq_ = false;
+    bool* irq_pending_ = nullptr;  // CPU's irq_pending flag
 
     // SCB
     uint32_t vtor_ = 0;
@@ -35,10 +37,36 @@ class NVIC : public Device {
     uint64_t last_tick_ = 0;
 
 public:
+    void set_irq_pending_flag(bool* flag) { irq_pending_ = flag; }
+    void signal_irq() { if (irq_pending_) *irq_pending_ = true; }
+
     uint32_t get_vtor() const { return vtor_; }
+    bool check_sysreset() {
+        if (!sysresetreq_) return false;
+        sysresetreq_ = false;
+        // Reset SCB state (real hardware resets everything)
+        vtor_ = 0;
+        aircr_ = 0xFA050000;
+        scr_ = 0;
+        ccr_ = 0x00000200;
+        shcsr_ = 0;
+        icsr_ = 0;
+        shpr_.fill(0);
+        // Reset NVIC
+        iser_.fill(0);
+        ispr_.fill(0);
+        iabr_.fill(0);
+        ipr_.fill(0);
+        sys_pending_ = 0;
+        // Reset SysTick
+        syst_csr_ = 0;
+        syst_rvr_ = 0;
+        syst_cvr_ = 0;
+        return true;
+    }
 
     void set_pending(uint32_t irq) {
-        if (irq < 240) ispr_[irq / 32] |= 1u << (irq % 32);
+        if (irq < 240) { ispr_[irq / 32] |= 1u << (irq % 32); signal_irq(); }
     }
 
     void clear_pending(uint32_t irq) {
@@ -100,7 +128,7 @@ public:
     }
 
     // System exception management
-    void set_sys_pending(uint32_t exc) { if (exc >= 2 && exc <= 15) sys_pending_ |= (1u << exc); }
+    void set_sys_pending(uint32_t exc) { if (exc >= 2 && exc <= 15) { sys_pending_ |= (1u << exc); signal_irq(); } }
     void clear_sys_pending(uint32_t exc) { if (exc >= 2 && exc <= 15) sys_pending_ &= ~(1u << exc); }
     bool is_sys_pending(uint32_t exc) const { return exc >= 2 && exc <= 15 && (sys_pending_ & (1u << exc)); }
 
@@ -185,7 +213,7 @@ private:
     void write_nvic(uint32_t off, uint32_t val) {
         if (off < 0x020) { iser_[off / 4] |= val; return; }                         // ISER: set bits
         if (off >= 0x080 && off < 0x0A0) { iser_[(off-0x080)/4] &= ~val; return; }  // ICER: clear bits
-        if (off >= 0x100 && off < 0x120) { ispr_[(off-0x100)/4] |= val; return; }   // ISPR: set pending
+        if (off >= 0x100 && off < 0x120) { ispr_[(off-0x100)/4] |= val; signal_irq(); return; }   // ISPR: set pending
         if (off >= 0x180 && off < 0x1A0) { ispr_[(off-0x180)/4] &= ~val; return; }  // ICPR: clear pending
         if (off >= 0x300 && off < 0x3F0) {                                           // IPR
             uint32_t idx = off - 0x300;
@@ -223,16 +251,19 @@ private:
     void write_scb(uint32_t off, uint32_t val) {
         switch (off) {
         case 0x04: // ICSR — write to clear/set pending
-                if (val & (1u << 28)) set_sys_pending(14); // PENDSVSET
+                if (val & (1u << 28)) {
+                    set_sys_pending(14); // PENDSVSET
+                }
             if (val & (1u << 27)) clear_sys_pending(14); // PENDSVCLR
             if (val & (1u << 26)) set_sys_pending(15); // PENDSTSET
             if (val & (1u << 25)) clear_sys_pending(15); // PENDSTCLR
             break;
-        case 0x08: vtor_ = val & 0xFFFFFF80; break;
+        case 0x08:
+            vtor_ = val & 0xFFFFFF80; break;
         case 0x0C:
             if ((val >> 16) == 0x05FA) {
                 aircr_ = (val & 0x0700) | 0xFA050000;
-                if (val & 0x04) { /* SYSRESETREQ — TODO */ }
+                if (val & 0x04) { sysresetreq_ = true; }
             }
             break;
         case 0x10: scr_ = val & 0x1E; break;

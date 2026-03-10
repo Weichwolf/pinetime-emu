@@ -47,8 +47,10 @@ private:
 
 class Flash : public Device {
     std::vector<uint8_t> mem_;
+    const uint32_t* nvmc_config_ = nullptr;  // Points to NVMC config register
 public:
     explicit Flash(uint32_t size) : mem_(size, 0xFF) {}
+    void set_nvmc_config(const uint32_t* cfg) { nvmc_config_ = cfg; }
 
     uint32_t read(uint32_t addr, Width w) override {
         if (addr + static_cast<uint32_t>(w) > mem_.size()) return 0;
@@ -61,8 +63,19 @@ public:
         return 0;
     }
 
-    void write(uint32_t /*addr*/, Width /*w*/, uint32_t /*val*/) override {
-        // Flash is read-only during normal operation
+    void write(uint32_t addr, Width w, uint32_t val) override {
+        // Flash writes only work when NVMC config=1 (write enabled)
+        if (!nvmc_config_ || *nvmc_config_ != 1) return;
+        if (addr + static_cast<uint32_t>(w) > mem_.size()) return;
+        // Flash write: can only clear bits (AND semantics)
+        switch (w) {
+        case Width::Byte: mem_[addr] &= val; break;
+        case Width::Half: mem_[addr] &= val; mem_[addr+1] &= val >> 8; break;
+        case Width::Word:
+            mem_[addr] &= val; mem_[addr+1] &= val >> 8;
+            mem_[addr+2] &= val >> 16; mem_[addr+3] &= val >> 24;
+            break;
+        }
     }
 
     uint8_t* data() { return mem_.data(); }

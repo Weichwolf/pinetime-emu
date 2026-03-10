@@ -52,7 +52,8 @@ public:
         for (auto& m : mappings_)
             if (addr >= m.base && addr < m.base + m.size)
                 return m.dev->read(addr - m.base, w);
-        fprintf(stderr, "[BUS] Unmapped read: 0x%08X\n", addr);
+        static int unmapped_r = 0;
+        if (unmapped_r++ < 10) fprintf(stderr, "[BUS] Unmapped read: 0x%08X\n", addr);
         return 0;
     }
 
@@ -68,7 +69,8 @@ public:
                 m.dev->write(addr - m.base, w, val);
                 return;
             }
-        fprintf(stderr, "[BUS] Unmapped write: 0x%08X = 0x%X\n", addr, val);
+        static int unmapped_w = 0;
+        if (unmapped_w++ < 10) fprintf(stderr, "[BUS] Unmapped write: 0x%08X = 0x%X\n", addr, val);
     }
 
     uint8_t  read8(uint32_t a)  const { return read(a, Width::Byte); }

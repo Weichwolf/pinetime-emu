@@ -134,12 +134,11 @@ void CPU::exception_entry(uint32_t exception_num) {
     bus_->write32(frame_sp + 24, r[15]); // Return address
     bus_->write32(frame_sp + 28, xpsr);
 
-    // Update stack pointer
+    // Update stack pointer used for frame
     if (use_psp) psp = frame_sp;
     else msp = frame_sp;
-    r[13] = use_psp ? psp : msp; // Keep r[13] in sync
 
-    // Set EXC_RETURN in LR
+    // Set EXC_RETURN in LR (before changing mode)
     if (use_psp)
         r[14] = 0xFFFFFFFD; // Thread mode, PSP
     else if (in_handler_mode())
@@ -147,10 +146,14 @@ void CPU::exception_entry(uint32_t exception_num) {
     else
         r[14] = 0xFFFFFFF9; // Thread mode, MSP
 
-    // Set active exception
-    xpsr = (xpsr & ~0xFFu) | (exception_num & 0xFF);
+    // Set active exception (IPSR is bits [8:0]) — now in handler mode
+    xpsr = (xpsr & ~0x1FFu) | (exception_num & 0x1FF);
+
+    // In handler mode, SP = MSP always
+    r[13] = msp;
     set_it_state(0); // Clear IT state
 
+    // Fetch vector
     // Fetch vector
     uint32_t vtor = nvic_ ? nvic_->get_vtor() : 0;
     uint32_t vector = bus_->read32(vtor + exception_num * 4);
@@ -184,16 +187,20 @@ void CPU::exception_return(uint32_t exc_return) {
     else msp = frame_sp;
 
     // Clear active exception before restoring xpsr
-    uint32_t prev_exc = xpsr & 0xFF;
+    uint32_t prev_exc = xpsr & 0x1FF;
     if (prev_exc >= 16 && nvic_)
         nvic_->clear_active(prev_exc - 16);
 
     // Restore xpsr (keep T bit set)
     xpsr = return_xpsr | (1u << 24);
 
-    // Restore SP based on return mode
+    // Restore SP and CONTROL based on return mode
     if (exc_return & 8) {
-        // Return to thread mode
+        // Return to thread mode — update CONTROL.SPSEL from EXC_RETURN[2]
+        if (exc_return & 4)
+            control |= 2;   // SPSEL=1 (PSP)
+        else
+            control &= ~2u;  // SPSEL=0 (MSP)
         r[13] = (control & 2) ? psp : msp;
     } else {
         // Return to handler mode
@@ -202,6 +209,7 @@ void CPU::exception_return(uint32_t exc_return) {
 
     r[15] = return_addr & ~1u;
     branch_taken_ = true;
+    irq_pending = true;  // Execution priority changed, re-check
 }
 
 void CPU::check_exceptions() {
@@ -209,7 +217,7 @@ void CPU::check_exceptions() {
 
     // Determine current execution priority
     int exec_pri = 256; // Lowest priority (thread mode)
-    uint8_t active_exc = xpsr & 0xFF;
+    uint16_t active_exc = xpsr & 0x1FF;
     if (active_exc) {
         if (active_exc >= 16)
             exec_pri = nvic_->priority(active_exc - 16);
@@ -260,11 +268,14 @@ void CPU::step() {
     }
 
     branch_taken_ = false;
-    uint16_t hw1 = bus_->read16(r[15]);
+    uint32_t inst_pc = r[15];
+
+uint16_t hw1 = bus_->read16(r[15]);
     bool is32 = (hw1 >> 11) >= 0x1D;
 
-    // IT block: check condition
-    bool skip = in_it_block() && !condition_passed(it_cond());
+    // IT block: check condition BEFORE execution
+    bool was_in_it = in_it_block();
+    bool skip = was_in_it && !condition_passed(it_cond());
 
     if (skip) {
         // Instruction skipped due to IT condition
@@ -278,14 +289,46 @@ void CPU::step() {
     if (!branch_taken_)
         r[15] += is32 ? 4 : 2;
 
-    if (in_it_block()) advance_it();
+    // Catch wild PC
+    if (r[15] >= 0x80000 && r[15] < 0x20000000) {
+        static int wild_count = 0;
+        if (wild_count == 0) {
+            uint16_t hw2_dbg = is32 ? bus_->read16(inst_pc + 2) : 0;
+            fprintf(stderr, "[CPU] Wild PC=0x%08X from inst@0x%08X hw1=0x%04X hw2=0x%04X cy=%llu\n",
+                    r[15], inst_pc, hw1, hw2_dbg, (unsigned long long)cycles);
+            fprintf(stderr, "  R0=0x%X R1=0x%X R2=0x%X R3=0x%X R4=0x%X R5=0x%X R6=0x%X R7=0x%X\n",
+                    r[0],r[1],r[2],r[3],r[4],r[5],r[6],r[7]);
+            fprintf(stderr, "  R8=0x%X R9=0x%X R10=0x%X R11=0x%X R12=0x%X SP=0x%X LR=0x%X\n",
+                    r[8],r[9],r[10],r[11],r[12],r[13],r[14]);
+        }
+        if (wild_count++ >= 2) { halted = true; return; }
+    }
+
+    // Advance IT state only if we were already in IT block before this instruction
+    // (IT instruction itself sets up the block but should not be advanced)
+    if (was_in_it) advance_it();
     cycles++;
 }
 
 void CPU::run(uint64_t target_cycles) {
     while (cycles < target_cycles && !halted) {
-        if (wfi) {
+        if (nvic_ && nvic_->check_sysreset()) {
+            fprintf(stderr, "[CPU] SYSRESETREQ at PC=0x%08X SP=0x%08X LR=0x%08X cy=%llu\n",
+                    r[15], r[13], r[14], (unsigned long long)cycles);
+            memset(r.data(), 0, sizeof(r));
+            xpsr = (1u << 24);
+            primask = basepri = faultmask = control = 0;
+            wfi = false;
+            branch_taken_ = false;
+            msp = bus_->read32(0) & ~3u;
+            r[13] = msp;
+            psp = 0;
+            r[15] = bus_->read32(4) & ~1u;
+            continue;
+        }
+        if (irq_pending || wfi) {
             check_exceptions();
+            irq_pending = false;
             if (wfi) { cycles++; continue; }
         }
         step();
@@ -708,7 +751,7 @@ void CPU::exec_thumb16_misc(uint16_t inst) {
     }
     case 0b0110: { // CPS (CPSIE/CPSID)
         if (inst & 0x10) primask |= 1;   // CPSID i
-        else primask &= ~1u;             // CPSIE i
+        else { primask &= ~1u; irq_pending = true; } // CPSIE i
         break;
     }
     case 0b1010: { // REV, REV16, REVSH
@@ -816,7 +859,8 @@ void CPU::exec_thumb32_01(uint16_t hw1, uint16_t hw2, uint8_t op2) {
         exec_thumb32_dp_shifted_reg(hw1, hw2);
     } else {
         // Coprocessor — not implemented for Cortex-M4 basic
-        fprintf(stderr, "[CPU] Coprocessor at 0x%08X\n", r[15]);
+        fprintf(stderr, "[CPU] Coprocessor hw1=%04X hw2=%04X at 0x%08X IT=%02X Z=%d LR=%08X\n",
+                hw1, hw2, r[15], (uint8_t)(((xpsr>>8)&0xFC)|((xpsr>>25)&3)), flag_z()?1:0, r[14]);
     }
 }
 
@@ -836,18 +880,22 @@ void CPU::exec_thumb32_10(uint16_t hw1, uint16_t hw2, uint8_t /*op2*/) {
 
 // op1=11: Load/store single, data processing (register), multiply, long multiply
 void CPU::exec_thumb32_11(uint16_t hw1, uint16_t hw2, uint8_t op2) {
-    if ((op2 & 0x70) == 0x00 || (op2 & 0x70) == 0x10 || (op2 & 0x70) == 0x20) {
-        // Load/store single
+    // op2 = hw1[10:4], dispatch based on ARM encoding:
+    // op2[6:5]=00 (0x00-0x1F): Load/store single data items
+    // op2[6:4]=010 (0x20-0x2F): Data processing (register): CLZ, REV, extends
+    // op2[6:3]=0110 (0x30-0x37): Multiply, multiply accumulate
+    // op2[6:3]=0111 (0x38-0x3F): Long multiply, divide
+    // op2[6]=1 (0x40-0x7F): Coprocessor / FP
+    if ((op2 & 0x60) == 0x00) {
         exec_thumb32_ldst_single(hw1, hw2);
-    } else if ((op2 & 0x70) == 0x40) {
-        // Data processing (register): CLZ, REV, etc.
+    } else if ((op2 & 0x70) == 0x20) {
         exec_thumb32_dp_register(hw1, hw2);
-    } else if ((op2 & 0x78) == 0x50) {
-        // Multiply, multiply accumulate
+    } else if ((op2 & 0x78) == 0x30) {
         exec_thumb32_multiply(hw1, hw2);
-    } else if ((op2 & 0x78) == 0x58) {
-        // Long multiply, long multiply accumulate, divide
+    } else if ((op2 & 0x78) == 0x38) {
         exec_thumb32_long_multiply(hw1, hw2);
+    } else if (op2 & 0x40) {
+        fprintf(stderr, "[CPU] Coprocessor at 0x%08X\n", r[15]);
     } else {
         fprintf(stderr, "[CPU] Unimpl Thumb-32 op1=11 op2=0x%02X at 0x%08X\n", op2, r[15]);
     }
@@ -918,34 +966,7 @@ void CPU::exec_thumb32_ldst_dual(uint16_t hw1, uint16_t hw2) {
         return;
     }
 
-    // LDRD / STRD (immediate)
-    if ((hw1 & 0xFE50) == 0xE850 || (hw1 & 0xFE50) == 0xE840) {
-        uint8_t rn = hw1 & 0xF;
-        uint8_t rt = (hw2 >> 12) & 0xF;
-        uint8_t rt2 = (hw2 >> 8) & 0xF;
-        uint32_t imm8 = (hw2 & 0xFF) << 2;
-        bool P = hw1 & 0x100;
-        bool U = hw1 & 0x80;
-        bool W = hw1 & 0x20;
-        bool L = hw1 & 0x10;
-
-        uint32_t base = read_reg(rn);
-        uint32_t offset_addr = U ? base + imm8 : base - imm8;
-        uint32_t addr = P ? offset_addr : base;
-
-        if (L) {
-            r[rt] = bus_->read32(addr);
-            r[rt2] = bus_->read32(addr + 4);
-        } else {
-            bus_->write32(addr, read_reg(rt));
-            bus_->write32(addr + 4, read_reg(rt2));
-        }
-
-        if (W) write_reg(rn, offset_addr);
-        return;
-    }
-
-    // TBB / TBH
+    // TBB / TBH (must check before LDRD, as encoding overlaps)
     if ((hw1 & 0xFFF0) == 0xE8D0 && (hw2 & 0xFFE0) == 0xF000) {
         uint8_t rn = hw1 & 0xF;
         uint8_t rm = hw2 & 0xF;
@@ -988,6 +1009,33 @@ void CPU::exec_thumb32_ldst_dual(uint16_t hw1, uint16_t hw2) {
         case 5: bus_->write16(addr, read_reg(rt)); r[rd] = 0; break; // STREXH
         default: break;
         }
+        return;
+    }
+
+    // LDRD / STRD (immediate)
+    if ((hw1 & 0xFE50) == 0xE850 || (hw1 & 0xFE50) == 0xE840) {
+        uint8_t rn = hw1 & 0xF;
+        uint8_t rt = (hw2 >> 12) & 0xF;
+        uint8_t rt2 = (hw2 >> 8) & 0xF;
+        uint32_t imm8 = (hw2 & 0xFF) << 2;
+        bool P = hw1 & 0x100;
+        bool U = hw1 & 0x80;
+        bool W = hw1 & 0x20;
+        bool L = hw1 & 0x10;
+
+        uint32_t base = read_reg(rn);
+        uint32_t offset_addr = U ? base + imm8 : base - imm8;
+        uint32_t addr = P ? offset_addr : base;
+
+        if (L) {
+            r[rt] = bus_->read32(addr);
+            r[rt2] = bus_->read32(addr + 4);
+        } else {
+            bus_->write32(addr, read_reg(rt));
+            bus_->write32(addr + 4, read_reg(rt2));
+        }
+
+        if (W) write_reg(rn, offset_addr);
         return;
     }
 
@@ -1301,11 +1349,11 @@ void CPU::exec_thumb32_branch(uint16_t hw1, uint16_t hw2) {
 
 // ---- Miscellaneous control (MSR, MRS, DSB, DMB, ISB, etc.) ----
 void CPU::exec_thumb32_misc_control(uint16_t hw1, uint16_t hw2) {
-    uint8_t op1 = (hw2 >> 12) & 7;
-    uint8_t op2 = (hw2 >> 4) & 0xF;
+    // Dispatch on hw1[7:5]: 100=MSR, 101=Hints/Barriers, 111=MRS
+    uint8_t cat = (hw1 >> 5) & 7;
 
-    if (op1 == 0 && !(hw2 & 1)) {
-        // MSR
+    if (cat == 4) {
+        // MSR (register): hw1[7:5] = 100
         uint8_t rn = hw1 & 0xF;
         uint8_t sysm = hw2 & 0xFF;
         uint32_t val = read_reg(rn);
@@ -1316,13 +1364,22 @@ void CPU::exec_thumb32_misc_control(uint16_t hw1, uint16_t hw2) {
         case 1: case 2: case 3: // IAPSR, EAPSR, PSR
             xpsr = (xpsr & 0x07FFFFFF) | (val & 0xF8000000);
             break;
-        case 16: primask = val & 1; break;
-        case 17: basepri = val & 0xFF; break;
+        case 16: primask = val & 1; irq_pending = true; break;
+        case 17: basepri = val & 0xFF; irq_pending = true; break;
         case 18: // BASEPRI_MAX
             if ((val & 0xFF) != 0 && ((val & 0xFF) < basepri || basepri == 0))
                 basepri = val & 0xFF;
+            irq_pending = true;
             break;
-        case 19: faultmask = val & 1; break;
+        case 8:  // MSP
+            msp = val & ~3u;
+            if (in_handler_mode() || !(control & 2)) r[13] = msp;
+            break;
+        case 9:  // PSP
+            psp = val & ~3u;
+            if (!in_handler_mode() && (control & 2)) r[13] = psp;
+            break;
+        case 19: faultmask = val & 1; irq_pending = true; break;
         case 20: {
             bool was_psp = !in_handler_mode() && (control & 2);
             control = val & 3;
@@ -1334,17 +1391,17 @@ void CPU::exec_thumb32_misc_control(uint16_t hw1, uint16_t hw2) {
         return;
     }
 
-    if (op1 == 2) {
-        // MRS
+    if (cat == 7) {
+        // MRS: hw1[7:5] = 111
         uint8_t rd = (hw2 >> 8) & 0xF;
         uint8_t sysm = hw2 & 0xFF;
         switch (sysm) {
         case 0: case 1: case 2: case 3:
             r[rd] = xpsr; break;
         case 5: case 6: case 7:
-            r[rd] = xpsr & 0xFF; break; // IPSR
-        case 8: case 9: case 10: case 11:
-            r[rd] = xpsr & 0x0600FC00; break; // EPSR (IT/T bits)
+            r[rd] = xpsr & 0x1FF; break; // IPSR (9 bits)
+        case 8: r[rd] = msp; break;     // MSP
+        case 9: r[rd] = psp; break;     // PSP
         case 16: r[rd] = primask; break;
         case 17: r[rd] = basepri; break;
         case 19: r[rd] = faultmask; break;
@@ -1353,16 +1410,9 @@ void CPU::exec_thumb32_misc_control(uint16_t hw1, uint16_t hw2) {
         return;
     }
 
-    if (op1 == 0 && (hw2 & 1)) {
-        // Hints and barriers
-        switch (op2) {
-        case 4: break; // DSB (barrier — NOP for single-core)
-        case 5: break; // DMB
-        case 6: break; // ISB
-        default: break;
-        }
-        return;
-    }
+    // Hints and barriers: hw1[7:5] = 101 (or other)
+    // DSB, DMB, ISB are NOPs for single-core emulation
+    return;
 
     fprintf(stderr, "[CPU] Unimpl misc control at 0x%08X: %04X %04X\n", r[15], hw1, hw2);
 }
@@ -1372,7 +1422,7 @@ void CPU::exec_thumb32_ldst_single(uint16_t hw1, uint16_t hw2) {
     uint8_t size = (hw1 >> 5) & 3;  // 00=byte, 01=half, 10=word
     bool sign = hw1 & 0x800;        // hw1[11]: signed load
     bool load = hw1 & 0x10;         // hw1[4]: load vs store
-    bool imm12_form = hw1 & 0x100;  // hw1[8]: U bit (positive imm12)
+    bool imm12_form = hw1 & 0x80;   // hw1[7]: 1=positive imm12, 0=imm8/register
     uint8_t rn = hw1 & 0xF;
     uint8_t rt = (hw2 >> 12) & 0xF;
 
@@ -1442,8 +1492,8 @@ void CPU::exec_thumb32_dp_register(uint16_t hw1, uint16_t hw2) {
     uint8_t rd = (hw2 >> 8) & 0xF;
     uint8_t rm = hw2 & 0xF;
 
-    if ((op1 & 0xC) == 0x0 && op2 == 0) {
-        // LSL/LSR/ASR/ROR (register) wide
+    if ((op1 & 0x8) == 0 && op2 == 0) {
+        // LSL/LSR/ASR/ROR (register) wide — op1[2:1]=shift type, op1[0]=S
         uint8_t op = (hw1 >> 5) & 3;
         ShiftType st = (ShiftType)op;
         uint8_t shift = read_reg(rm) & 0xFF;
@@ -1454,7 +1504,7 @@ void CPU::exec_thumb32_dp_register(uint16_t hw1, uint16_t hw2) {
         return;
     }
 
-    if (op1 == 0 && op2 != 0) {
+    if (op1 <= 5 && op2 != 0) {
         // Sign/zero extend (SXTH, SXTB, UXTH, UXTB, SXTB16, etc.)
         uint8_t rotation = ((hw2 >> 4) & 3) * 8;
         uint32_t val = read_reg(rm);
@@ -1490,8 +1540,8 @@ void CPU::exec_thumb32_dp_register(uint16_t hw1, uint16_t hw2) {
         return;
     }
 
-    // Misc operations (op1=2,3)
-    if ((op1 & 0xE) == 0x2) {
+    // Misc operations (op1=8-11: REV, REV16, RBIT, REVSH, CLZ)
+    if ((op1 & 0xC) == 0x8) {
         // RBIT, REV, REV16, REVSH, CLZ
         uint32_t val = read_reg(rm);
         switch (op2) {

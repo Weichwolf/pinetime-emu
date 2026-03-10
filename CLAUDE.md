@@ -12,13 +12,24 @@ Display ST7789 240×240 SPI, Touch CST816S I2C, HR HRS3300 I2C, Accel BMA421 I2C
 ```
 pinetime-emu/
 ├── src/
-│   ├── main.cpp              # EmulatorContext, CLI, SDL2 Main-Loop
+│   ├── main.cpp              # EmulatorContext, alle Peripherals verdrahtet, SDL2 Main-Loop
 │   ├── cpu.hpp               # Cortex-M4F State + Interface
 │   ├── cpu.cpp               # Thumb-2 Execution Engine (~1500 Zeilen)
 │   ├── bus.hpp               # Device Interface, Bus mit Fast-Path
 │   └── device/
 │       ├── memory.hpp        # Flash (read-only) + RAM
-│       └── nvic.hpp          # NVIC + SCB + SysTick (System Control Space)
+│       ├── nvic.hpp          # NVIC + SCB + SysTick (System Control Space)
+│       ├── clock_power.hpp   # CLOCK + POWER (shared base 0x40000000)
+│       ├── gpio.hpp          # GPIO P0 + GPIOTE
+│       ├── timer.hpp         # TIMER (32-bit, 6 CC) + RTC (24-bit, 4 CC)
+│       ├── spim.hpp          # SPIM mit EasyDMA + SpiCallback
+│       ├── twim.hpp          # TWIM mit EasyDMA + I2CDevice-Interface
+│       ├── nvmc.hpp          # Flash Controller (CONFIG/ERASEPAGE)
+│       ├── rng.hpp           # Random Number Generator (VALRDY events)
+│       ├── ecb.hpp           # AES-128 ECB Encryption
+│       ├── wdt.hpp           # Watchdog (akzeptiert Reload, kein Timeout)
+│       ├── st7789.hpp        # ST7789 LCD Controller (240×240 RGB565 Framebuffer)
+│       └── i2c_devices.hpp   # CST816S Touch, HRS3300 HR, BMA4xx Accel
 ├── tests/
 │   ├── test_basic.s          # CPU-Grundtest (10 Tests, BKPT-terminiert)
 │   ├── test.ld               # Linker-Script für Tests
@@ -68,16 +79,31 @@ Thumb-2 ISA, organisiert in Gruppen:
 **IT-Blöcke**: Condition-Check vor Execution, `advance_it()` danach. 16-bit Instruktionen setzen keine Flags in IT.
 **Exceptions**: Cortex-M Stacking (8 Register), EXC_RETURN Magic Values, NVIC-Prioritäten.
 
-## nRF52832 Memory Map
+## nRF52832 Peripherals (implementiert)
 
-| Adresse | Größe | Gerät |
+| Adresse | Gerät | Datei |
 |---------|-------|-------|
-| 0x00000000 | 512KB | Flash |
-| 0x10000000 | 4KB | FICR (Factory Info, Stub-Werte) |
-| 0x10001000 | 4KB | UICR (Stub) |
-| 0x20000000 | 64KB | SRAM |
-| 0x40000000 | 512MB | Peripherals (Stub — gibt 0 zurück) |
-| 0xE000E000 | 4KB | SCS (NVIC + SCB + SysTick) |
+| 0x00000000 | Flash 512KB | memory.hpp |
+| 0x10000000 | FICR (nRF52832 IDs) | main.cpp (RAM-Stub) |
+| 0x10001000 | UICR | main.cpp (RAM-Stub) |
+| 0x20000000 | SRAM 64KB | memory.hpp |
+| 0x40000000 | CLOCK + POWER | clock_power.hpp |
+| 0x40003000 | SPIM0 → ST7789 | spim.hpp |
+| 0x40004000 | TWIM1 → Touch/HR/Accel | twim.hpp |
+| 0x40006000 | GPIOTE | gpio.hpp |
+| 0x40008000 | TIMER0 | timer.hpp |
+| 0x40009000 | TIMER1 | timer.hpp |
+| 0x4000A000 | TIMER2 | timer.hpp |
+| 0x40010000 | WDT | wdt.hpp |
+| 0x40011000 | RTC0 | timer.hpp |
+| 0x40014000 | RTC1 | timer.hpp |
+| 0x40024000 | RTC2 | timer.hpp |
+| 0x4001E000 | NVMC | nvmc.hpp |
+| 0x50000000 | GPIO P0 | gpio.hpp |
+| 0xE000E000 | SCS (NVIC+SCB+SysTick) | nvic.hpp |
+| 0x4000D000 | RNG | rng.hpp |
+| 0x4000E000 | ECB (AES-128) | ecb.hpp |
+| Stubs | Radio, PPI, SAADC, TEMP, FPU | main.cpp |
 
 ## Test-Konvention
 
@@ -85,14 +111,17 @@ Tests terminieren via BKPT. R0=0 = PASS, R0=N = Test N fehlgeschlagen.
 
 ## Status
 
-**CPU**: Thumb-2 Core funktional (16-bit + 32-bit, IT-Blöcke, Exceptions). 10 Basistests bestehen.
+**CPU**: Thumb-2 Core funktional (16-bit + 32-bit, IT-Blöcke, Exceptions, interrupt-driven scheduling). 10 Basistests bestehen.
+**Peripherals**: Alle für InfiniTime nötigen nRF52-Peripherals implementiert (RNG, ECB, NVMC, SysTick, NVIC, SPIm, TWIm, Timers, RTCs).
+**PineTime**: ST7789 (SPI→Framebuffer→SDL2), CST816S (Touch→Maus), HRS3300, BMA4xx.
+**Firmware**: `firmware/merged-internal.bin` — InfiniTime 1.14.1 + MCUBoot Bootloader.
+
+**InfiniTime Boot**: ✓ Erfolgreich. Display ON, Watchface gerendert (23k/57k Pixel), FreeRTOS stabil (10s Laufzeit, Scheduler aktiv, Tasks blockiert auf Events).
 
 **Offen**:
-- nRF52 Peripherals: GPIO, SPIM, TWIM, RTC, TIMER, CLOCK, POWER, RADIO
-- PineTime Devices: ST7789 (Display→SDL2), CST816S (Touch→Maus), HRS3300, BMA421
 - Ext. SPI Flash (4MB)
 - FPU (Cortex-M4F Hard-Float)
-- Mehr CPU-Tests (Edge-Cases, Interrupts)
+- Performance-Optimierung (aktuell ~1x Echtzeit)
 
 ## Workflow
 

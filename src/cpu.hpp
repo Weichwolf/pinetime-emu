@@ -25,6 +25,7 @@ public:
     uint64_t cycles = 0;
     bool halted = false;
     bool wfi = false;
+    bool irq_pending = false;  // Set when any interrupt state changes
 
     explicit CPU(Bus* bus) : bus_(bus) {}
 
@@ -76,7 +77,7 @@ public:
     }
 
     // Exception state
-    bool in_handler_mode() const { return (xpsr & 0xFF) != 0; }
+    bool in_handler_mode() const { return (xpsr & 0x1FF) != 0; }
     uint8_t active_exception() const { return xpsr & 0xFF; }
 
     // IT block state
