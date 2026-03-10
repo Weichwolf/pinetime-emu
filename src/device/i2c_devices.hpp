@@ -67,6 +67,9 @@ class HRS3300 : public I2CDevice {
 
 public:
     static constexpr uint8_t I2C_ADDR = 0x44;
+    uint32_t read_count_ = 0;
+    uint32_t write_count_ = 0;
+    uint8_t reg(uint8_t addr) const { return regs_[addr]; }
 
     HRS3300() {
         regs_[0x00] = 0x21; // ID register
@@ -77,29 +80,57 @@ public:
 
     void i2c_write(const uint8_t* data, uint32_t len) override {
         if (len >= 1) reg_ptr_ = data[0];
-        if (len >= 2) regs_[reg_ptr_] = data[1];
+        if (len >= 2) {
+            regs_[reg_ptr_] = data[1];
+            write_count_++;
+        }
     }
 
     void i2c_read(uint8_t* data, uint32_t len) override {
-        if (cycles_ && (regs_[0x01] & 0x80)) update_ppg();
+        read_count_++;
+        if (cycles_) update_ppg();
         for (uint32_t i = 0; i < len; i++)
             data[i] = regs_[(uint8_t)(reg_ptr_ + i)];
     }
 
 private:
+    // Simple hash for deterministic noise
+    static uint32_t noise(uint64_t x) {
+        x ^= x >> 17; x *= 0xbf58476d1ce4e5b9ULL;
+        x ^= x >> 31; x *= 0x94d049bb133111ebULL;
+        return (uint32_t)(x >> 32);
+    }
+
     void update_ppg() {
         double t = *cycles_ / 64e6;
         constexpr double bpm = 72.0;
         double phase = 2.0 * M_PI * (bpm / 60.0) * t;
 
-        // PPG waveform: fundamental + 2nd harmonic for realistic dicrotic notch
-        double ppg = 4000.0 + 1500.0 * sin(phase) + 400.0 * sin(2.0 * phase + 0.8);
-        uint32_t v = (uint32_t)std::max(0.0, std::min(ppg, 262143.0)); // clamp 18-bit
+        // PPG waveform: sharp systolic peak + slower diastolic decay
+        double systolic = exp(-0.5 * pow(fmod(phase, 2*M_PI) - 1.0, 2) / 0.15);
+        double diastolic = 0.3 * exp(-0.5 * pow(fmod(phase, 2*M_PI) - 2.0, 2) / 0.3);
+        double ppg_ac = systolic + diastolic;
 
-        // Encode for InfiniTime's ReadHrs() decoding
-        regs_[0x09] = (v >> 8) & 0xFF;                              // bits [15:8]
-        regs_[0x08] = (regs_[0x08] & 0xF0) | ((v >> 4) & 0x0F);    // bits [7:4]
-        regs_[0x0A] = (v & 0x0F) | (((v >> 16) & 0x03) << 4);      // bits [3:0] + [17:16]
+        // Noise: deterministic from cycle count, ~2% amplitude
+        uint32_t n = noise(*cycles_ / 640000); // changes every ~10ms
+        double jitter = ((int32_t)(n & 0xFFF) - 2048) / 2048.0; // [-1, 1]
+
+        double ppg = 30000.0 + 10000.0 * ppg_ac + 600.0 * jitter;
+        uint32_t v = (uint32_t)std::max(0.0, std::min(ppg, 262143.0));
+
+        // Encode for InfiniTime's ReadHrs():
+        //   m=reg[0x09], h=reg[0x0A], l=reg[0x0F]
+        //   value = (m<<8) | ((h&0xF)<<4) | (l&0xF) | ((l&0x30)<<12)
+        regs_[0x09] = (v >> 8) & 0xFF;                          // m: bits [15:8]
+        regs_[0x0A] = (v >> 4) & 0x0F;                          // h: bits [7:4]
+        regs_[0x0F] = (v & 0x0F) | (((v >> 16) & 0x03) << 4);  // l: bits [3:0] + [17:16]
+
+        // ALS via ReadAls(): m=reg[0x08], h=reg[0x0D], l=reg[0x0E]
+        //   value = (m<<3) | ((h&0x3F)<<11) | (l&0x07)
+        // Low constant (indoor, sensor on wrist) ≈ 100
+        regs_[0x08] = 0x0C;  // m: 0x0C << 3 = 96
+        regs_[0x0D] = 0x00;  // h: 0
+        regs_[0x0E] = 0x04;  // l: 4 → total ALS ≈ 100
     }
 };
 
@@ -120,7 +151,7 @@ public:
         regs_[0x03] = 0x01; // STATUS (data ready)
         // Default: standing still (Z = +1g)
         regs_[0x16] = 0x00; regs_[0x17] = 0x10; // ACC_Z ~4096
-        regs_[0x1A] = 0x01; // INTERNAL_STATUS: config stream loaded
+        regs_[0x2A] = 0x01; // INTERNAL_STATUS (BMA4_INTERNAL_STAT): init OK
     }
 
     void set_cycles(const uint64_t* c) { cycles_ = c; }

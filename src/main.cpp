@@ -404,6 +404,8 @@ static int run_headless(EmulatorContext& emu, uint32_t timeout_ms, bool trace) {
         }
     }
     fprintf(stderr, "[SPIM0] transfers=%u\n", emu.spim0.transfer_count());
+    fprintf(stderr, "[HRS3300] reads=%u writes=%u enable=0x%02X\n",
+            emu.hrs.read_count_, emu.hrs.write_count_, emu.hrs.reg(0x01));
     // External SPI flash state
     {
         int non_ff = 0;
@@ -614,15 +616,15 @@ static int run_interactive(EmulatorContext& emu) {
         }
 
 
-        // Periodic status
+        // Periodic status (every ~1s emulated time)
         if (emu.cpu.cycles - last_status >= 64'000'000) {
             last_status = emu.cpu.cycles;
-            const uint16_t* fb = emu.display.framebuffer();
-            int nonzero = 0;
-            for (int i = 0; i < 240*240; i++) if (fb[i]) nonzero++;
-            fprintf(stderr, "[GUI] %.1fs  PC=0x%08X SP=0x%08X WFI=%d pixels=%d display=%d\n",
-                    emu.cpu.cycles / 64e6, emu.cpu.r[15], emu.cpu.r[13],
-                    emu.cpu.wfi ? 1 : 0, nonzero, emu.display.is_on() ? 1 : 0);
+            char title[128];
+            snprintf(title, sizeof(title), "PineTime  %.0fs  HRS: rd=%u wr=%u en=0x%02X",
+                     emu.cpu.cycles / 64e6,
+                     emu.hrs.read_count_, emu.hrs.write_count_,
+                     emu.hrs.reg(0x01));
+            SDL_SetWindowTitle(window, title);
         }
 
         // Render display
