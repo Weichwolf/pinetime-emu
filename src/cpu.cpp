@@ -1998,9 +1998,8 @@ void CPU::exec_vfp_dp(uint32_t inst) {
         case 0x0: // VMLA/VMLS (opc3[0] selects MLS)
             result = (opc3 & 1) ? sf(vd) - a*b : sf(vd) + a*b;
             sf(vd) = result; return;
-        case 0x1: // VNMLA/VNMLS/VNMUL
-            if (opc3 & 2) { sf(vd) = -(a*b); return; } // VNMUL (opc3=1x)
-            result = (opc3 & 1) ? -(sf(vd) - a*b) : -(sf(vd) + a*b);
+        case 0x1: // VNMLS(opc3=0) / VNMLA(opc3=1)
+            result = (opc3 & 1) ? -(sf(vd) + a*b) : -(sf(vd) - a*b);
             sf(vd) = result; return;
         case 0x2: // VMUL/VNMUL
             sf(vd) = (opc3 & 1) ? -(a*b) : a*b; // opc3[0] selects VNMUL vs VMUL
@@ -2031,7 +2030,8 @@ void CPU::exec_vfp_dp(uint32_t inst) {
         double a = df(vn), b = df(vm_idx);
         switch (opc1 & 0xB) {
         case 0x0: set_df(vd, (opc3&1) ? df(vd)-a*b : df(vd)+a*b); return;
-        case 0x2: set_df(vd, a*b); return;
+        case 0x1: set_df(vd, (opc3&1) ? -(df(vd)+a*b) : -(df(vd)-a*b)); return;
+        case 0x2: set_df(vd, (opc3&1) ? -(a*b) : a*b); return;
         case 0x3: set_df(vd, (opc3&1) ? a-b : a+b); return;
         case 0x8: set_df(vd, a/b); return;
         case 0x9: set_df(vd, (opc3&1) ? -(df(vd)+a*b) : -(df(vd)-a*b)); return;
@@ -2107,12 +2107,12 @@ void CPU::exec_vfp_misc_double(uint32_t inst, uint8_t vd, uint8_t vm) {
 
     switch (opc2) {
     case 0x0:
-        if (opc3 & 1) set_df(vd, fabs(df(vm)));
-        else set_df(vd, df(vm)); // VMOV
+        if (opc3 & 2) set_df(vd, fabs(df(vm)));  // VABS.F64 (opc3=11)
+        else set_df(vd, df(vm));                   // VMOV.F64 (opc3=01)
         return;
     case 0x1:
-        if (opc3 & 1) set_df(vd, sqrt(df(vm)));
-        else set_df(vd, -df(vm));
+        if (opc3 & 2) set_df(vd, sqrt(df(vm)));   // VSQRT.F64 (opc3=11)
+        else set_df(vd, -df(vm));                   // VNEG.F64 (opc3=01)
         return;
     case 0x4: case 0x5: {
         double a = df(vd);
@@ -2125,18 +2125,16 @@ void CPU::exec_vfp_misc_double(uint32_t inst, uint8_t vd, uint8_t vm) {
         return;
     }
     case 0x7: // VCVT.F32.F64 Sd, Dm → demote double to single
-        if (!(opc3 & 1)) {
-            sf(vd) = (float)df(vm);
-        }
+        sf(vd) = (float)df(vm);
         return;
     case 0x8:
-        if (opc3 & 1) set_df(vd, (double)(int32_t)s[vm*2]);
-        else set_df(vd, (double)s[vm*2]);
+        if (opc3 & 2) set_df(vd, (double)(int32_t)s[vm*2]);  // S32→F64
+        else set_df(vd, (double)s[vm*2]);                      // U32→F64
         return;
     case 0xC: case 0xD: {
         double v = df(vm);
-        if (opc2 & 1) s[vd*2] = (int32_t)v;
-        else s[vd*2] = (uint32_t)v;
+        if (opc2 & 1) s[vd*2] = (int32_t)v;   // S32
+        else s[vd*2] = (uint32_t)v;             // U32
         return;
     }
     }

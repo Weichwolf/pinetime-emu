@@ -1060,6 +1060,340 @@ void test_vmov_core_to_fpu() {
     ASSERT_EQ(e.cpu.s[0], 42u);
 }
 
+// Helper: set single-precision register
+void set_sf(CPU& cpu, int reg, float v) { memcpy(&cpu.s[reg], &v, 4); }
+float get_sf(CPU& cpu, int reg) { float v; memcpy(&v, &cpu.s[reg], 4); return v; }
+
+// Helper: run a single VFP instruction from given S-register state
+void run_vfp(MiniEnv& e, uint16_t hw1, uint16_t hw2) {
+    e.write_thumb32(0x100, hw1, hw2);
+    e.write_thumb16(0x104, 0xBE00); // BKPT
+    e.cpu.xpsr = (1u << 24);
+    e.cpu.r[15] = 0x100;
+    e.cpu.halted = false;
+    e.cpu.run(100);
+    ASSERT(e.cpu.halted);
+}
+
+// === VFPv4 Fused Multiply-Add (single-precision, C++ tests) ===
+
+void test_vfp_vfma() {
+    MiniEnv e;
+    e.nvic.write(0xD88, Width::Word, 0x00F00000);
+    e.cpu.reset();
+    // VFMA.F32 S0, S2, S4: Sd = Sd + Sn*Sm
+    set_sf(e.cpu, 0, 1.0f); set_sf(e.cpu, 2, 2.0f); set_sf(e.cpu, 4, 3.0f);
+    run_vfp(e, 0xEEA1, 0x0A02); // VFMA.F32 S0, S2, S4
+    ASSERT_EQ((int)(get_sf(e.cpu, 0) * 10), 70); // 1+2*3=7
+}
+
+void test_vfp_vfms() {
+    MiniEnv e;
+    e.nvic.write(0xD88, Width::Word, 0x00F00000);
+    e.cpu.reset();
+    // VFMS.F32 S0, S2, S4: Sd = Sd - Sn*Sm
+    set_sf(e.cpu, 0, 10.0f); set_sf(e.cpu, 2, 2.0f); set_sf(e.cpu, 4, 3.0f);
+    run_vfp(e, 0xEEA1, 0x0A42); // VFMS.F32 S0, S2, S4
+    ASSERT_EQ((int)(get_sf(e.cpu, 0) * 10), 40); // 10-2*3=4
+}
+
+void test_vfp_vfnma() {
+    MiniEnv e;
+    e.nvic.write(0xD88, Width::Word, 0x00F00000);
+    e.cpu.reset();
+    // VFNMA.F32 S0, S2, S4: Sd = -(Sd + Sn*Sm)
+    set_sf(e.cpu, 0, 1.0f); set_sf(e.cpu, 2, 2.0f); set_sf(e.cpu, 4, 3.0f);
+    run_vfp(e, 0xEE91, 0x0A42); // VFNMA.F32 S0, S2, S4
+    ASSERT_EQ((int)(get_sf(e.cpu, 0) * 10), -70); // -(1+6)=-7
+}
+
+void test_vfp_vfnms() {
+    MiniEnv e;
+    e.nvic.write(0xD88, Width::Word, 0x00F00000);
+    e.cpu.reset();
+    // VFNMS.F32 S0, S2, S4: Sd = -(Sd - Sn*Sm)
+    set_sf(e.cpu, 0, 10.0f); set_sf(e.cpu, 2, 2.0f); set_sf(e.cpu, 4, 3.0f);
+    run_vfp(e, 0xEE91, 0x0A02); // VFNMS.F32 S0, S2, S4
+    ASSERT_EQ((int)(get_sf(e.cpu, 0) * 10), -40); // -(10-6)=-4
+}
+
+// === VNMLA/VNMLS (single-precision, C++ tests) ===
+
+void test_vfp_vnmla() {
+    MiniEnv e;
+    e.nvic.write(0xD88, Width::Word, 0x00F00000);
+    e.cpu.reset();
+    // VNMLA.F32 S0, S2, S4: Sd = -(Sd + Sn*Sm)
+    set_sf(e.cpu, 0, 1.0f); set_sf(e.cpu, 2, 2.0f); set_sf(e.cpu, 4, 3.0f);
+    run_vfp(e, 0xEE11, 0x0A42); // VNMLA.F32 S0, S2, S4
+    ASSERT_EQ((int)(get_sf(e.cpu, 0) * 10), -70); // -(1+6)=-7
+}
+
+void test_vfp_vnmls() {
+    MiniEnv e;
+    e.nvic.write(0xD88, Width::Word, 0x00F00000);
+    e.cpu.reset();
+    // VNMLS.F32 S0, S2, S4: Sd = -(Sd - Sn*Sm)
+    set_sf(e.cpu, 0, 10.0f); set_sf(e.cpu, 2, 2.0f); set_sf(e.cpu, 4, 3.0f);
+    run_vfp(e, 0xEE11, 0x0A02); // VNMLS.F32 S0, S2, S4
+    ASSERT_EQ((int)(get_sf(e.cpu, 0) * 10), -40); // -(10-6)=-4
+}
+
+void test_vfp_vsub() {
+    MiniEnv e;
+    e.nvic.write(0xD88, Width::Word, 0x00F00000);
+    e.cpu.reset();
+    set_sf(e.cpu, 2, 5.0f); set_sf(e.cpu, 4, 2.0f);
+    run_vfp(e, 0xEE31, 0x0A42); // VSUB.F32 S0, S2, S4
+    ASSERT_EQ((int)(get_sf(e.cpu, 0) * 10), 30); // 5-2=3
+}
+
+void test_vfp_vdiv() {
+    MiniEnv e;
+    e.nvic.write(0xD88, Width::Word, 0x00F00000);
+    e.cpu.reset();
+    set_sf(e.cpu, 2, 15.0f); set_sf(e.cpu, 4, 3.0f);
+    run_vfp(e, 0xEE81, 0x0A02); // VDIV.F32 S0, S2, S4
+    ASSERT_EQ((int)(get_sf(e.cpu, 0) * 10), 50); // 15/3=5
+}
+
+void test_vfp_vnmul() {
+    MiniEnv e;
+    e.nvic.write(0xD88, Width::Word, 0x00F00000);
+    e.cpu.reset();
+    set_sf(e.cpu, 2, 3.0f); set_sf(e.cpu, 4, 5.0f);
+    run_vfp(e, 0xEE21, 0x0A42); // VNMUL.F32 S0, S2, S4
+    ASSERT_EQ((int)(get_sf(e.cpu, 0) * 10), -150); // -(3*5)=-15
+}
+
+void test_vfp_vmla_vmls() {
+    MiniEnv e;
+    e.nvic.write(0xD88, Width::Word, 0x00F00000);
+    e.cpu.reset();
+    // VMLA: S0 = S0 + S2*S4 = 1 + 2*3 = 7
+    set_sf(e.cpu, 0, 1.0f); set_sf(e.cpu, 2, 2.0f); set_sf(e.cpu, 4, 3.0f);
+    run_vfp(e, 0xEE01, 0x0A02); // VMLA.F32 S0, S2, S4
+    ASSERT_EQ((int)(get_sf(e.cpu, 0) * 10), 70);
+
+    // VMLS: S0 = S0 - S2*S4 = 7 - 2*3 = 1
+    run_vfp(e, 0xEE01, 0x0A42); // VMLS.F32 S0, S2, S4
+    ASSERT_EQ((int)(get_sf(e.cpu, 0) * 10), 10);
+}
+
+// === Double-precision (C++ only — not assemblable with fpv4-sp-d16) ===
+
+void test_vfp_double_arith() {
+    MiniEnv e;
+    e.nvic.write(0xD88, Width::Word, 0x00F00000);
+    e.cpu.reset();
+
+    // VADD.F64 D0, D1, D2: 2.0 + 3.0 = 5.0
+    e.cpu.set_df(1, 2.0); e.cpu.set_df(2, 3.0);
+    run_vfp(e, 0xEE31, 0x0B02); // VADD.F64 D0, D1, D2
+    ASSERT_EQ((int)(e.cpu.df(0) * 10), 50);
+
+    // VSUB.F64 D0, D1, D2: 2.0 - 3.0 = -1.0
+    run_vfp(e, 0xEE31, 0x0B42); // VSUB.F64 D0, D1, D2
+    ASSERT_EQ((int)(e.cpu.df(0) * 10), -10);
+
+    // VMUL.F64 D0, D1, D2: 2.0 * 3.0 = 6.0
+    run_vfp(e, 0xEE21, 0x0B02);
+    ASSERT_EQ((int)(e.cpu.df(0) * 10), 60);
+
+    // VDIV.F64 D0, D1, D2: 2.0 / 3.0 ≈ 0.6667
+    e.cpu.set_df(1, 10.0); e.cpu.set_df(2, 4.0);
+    run_vfp(e, 0xEE81, 0x0B02);
+    ASSERT_EQ((int)(e.cpu.df(0) * 10), 25); // 10/4=2.5
+}
+
+void test_vfp_double_fma() {
+    MiniEnv e;
+    e.nvic.write(0xD88, Width::Word, 0x00F00000);
+    e.cpu.reset();
+
+    // VFMA.F64 D0, D1, D2: D0 = D0 + D1*D2 = 1 + 2*3 = 7
+    e.cpu.set_df(0, 1.0); e.cpu.set_df(1, 2.0); e.cpu.set_df(2, 3.0);
+    run_vfp(e, 0xEEA1, 0x0B02);
+    ASSERT_EQ((int)(e.cpu.df(0) * 10), 70);
+
+    // VFMS.F64 D0, D1, D2: D0 = D0 - D1*D2 = 7 - 2*3 = 1
+    run_vfp(e, 0xEEA1, 0x0B42);
+    ASSERT_EQ((int)(e.cpu.df(0) * 10), 10);
+
+    // VFNMA.F64 D0, D1, D2: D0 = -(D0 + D1*D2) = -(1+6) = -7
+    run_vfp(e, 0xEE91, 0x0B42);
+    ASSERT_EQ((int)(e.cpu.df(0) * 10), -70);
+
+    // VFNMS.F64 D0, D1, D2: D0 = -(D0 - D1*D2) = -(-7-6) = 13
+    run_vfp(e, 0xEE91, 0x0B02);
+    ASSERT_EQ((int)(e.cpu.df(0) * 10), 130);
+}
+
+void test_vfp_double_negmul() {
+    MiniEnv e;
+    e.nvic.write(0xD88, Width::Word, 0x00F00000);
+    e.cpu.reset();
+
+    // VNMUL.F64 D0, D1, D2: -(2*3) = -6
+    e.cpu.set_df(1, 2.0); e.cpu.set_df(2, 3.0);
+    run_vfp(e, 0xEE21, 0x0B42);
+    ASSERT_EQ((int)(e.cpu.df(0) * 10), -60);
+
+    // VMLA.F64 D0, D1, D2: D0 = D0 + D1*D2 = -6 + 6 = 0
+    run_vfp(e, 0xEE01, 0x0B02);
+    ASSERT_EQ((int)(e.cpu.df(0) * 10), 0);
+
+    // VMLS.F64 D0, D1, D2: D0 = D0 - D1*D2 = 0 - 6 = -6
+    run_vfp(e, 0xEE01, 0x0B42);
+    ASSERT_EQ((int)(e.cpu.df(0) * 10), -60);
+
+    // VNMLA.F64 D0, D1, D2: D0 = -(D0 + D1*D2) = -(-6+6) = 0
+    e.cpu.set_df(0, -6.0);
+    run_vfp(e, 0xEE11, 0x0B42);
+    ASSERT_EQ((int)(e.cpu.df(0) * 10), 0);
+
+    // VNMLS.F64 D0, D1, D2: D0 = -(D0 - D1*D2) = -(0-6) = 6
+    run_vfp(e, 0xEE11, 0x0B02);
+    ASSERT_EQ((int)(e.cpu.df(0) * 10), 60);
+}
+
+void test_vfp_double_misc() {
+    MiniEnv e;
+    e.nvic.write(0xD88, Width::Word, 0x00F00000);
+    e.cpu.reset();
+
+    // VMOV.F64 D0, D1
+    e.cpu.set_df(1, 3.14);
+    run_vfp(e, 0xEEB0, 0x0B41);
+    ASSERT_EQ((int)(e.cpu.df(0) * 100), 314);
+
+    // VNEG.F64 D0, D1: -(3.14) = -3.14
+    run_vfp(e, 0xEEB1, 0x0B41);
+    ASSERT_EQ((int)(e.cpu.df(0) * 100), -314);
+
+    // VABS.F64 D0, D1: abs(D1) — set D1=-5.0
+    e.cpu.set_df(1, -5.0);
+    run_vfp(e, 0xEEB0, 0x0BC1);
+    ASSERT_EQ((int)(e.cpu.df(0) * 10), 50);
+
+    // VSQRT.F64 D0, D1: sqrt(9.0) = 3.0
+    e.cpu.set_df(1, 9.0);
+    run_vfp(e, 0xEEB1, 0x0BC1);
+    ASSERT_EQ((int)(e.cpu.df(0) * 10), 30);
+
+    // VCMP.F64 D0(3.0), D1(9.0): 3 < 9 → N=1
+    run_vfp(e, 0xEEB4, 0x0B41);
+    ASSERT(e.cpu.fpscr & 0x80000000); // N flag
+
+    // VCMP.F64 D0, D0: equal → Z=1,C=1
+    e.cpu.set_df(1, 3.0); // D1=D0=3.0
+    run_vfp(e, 0xEEB4, 0x0B41);
+    // Actually D0=3.0 from sqrt, D1 was 9.0 then we set D1=3.0
+    // Need to compare D0 with D1 which is now 3.0
+    // D0 is 3.0 from sqrt result, D1 just set to 3.0
+    ASSERT(e.cpu.fpscr & 0x40000000); // Z flag set (equal)
+
+    // VCMPE.F64 D0, #0: 3.0 > 0 → C=1 only
+    run_vfp(e, 0xEEB5, 0x0B40);
+    ASSERT(e.cpu.fpscr & 0x20000000);   // C flag
+    ASSERT(!(e.cpu.fpscr & 0x80000000)); // not N
+    ASSERT(!(e.cpu.fpscr & 0x40000000)); // not Z
+}
+
+void test_vfp_double_cvt() {
+    MiniEnv e;
+    e.nvic.write(0xD88, Width::Word, 0x00F00000);
+    e.cpu.reset();
+
+    // VCVT.F64.S32 D0, S2: signed int→double
+    e.cpu.s[2] = (uint32_t)(int32_t)-42; // S2 = -42 as int
+    run_vfp(e, 0xEEB8, 0x0BC1);
+    ASSERT_EQ((int)(e.cpu.df(0) * 10), -420);
+
+    // VCVT.F64.U32 D0, S2: unsigned int→double
+    e.cpu.s[2] = 200;
+    run_vfp(e, 0xEEB8, 0x0B41);
+    ASSERT_EQ((int)(e.cpu.df(0) * 10), 2000);
+
+    // VCVT.S32.F64 S0, D1: double→signed int (toward zero)
+    e.cpu.set_df(1, -7.9);
+    run_vfp(e, 0xEEBD, 0x0BC1);
+    ASSERT_EQ(e.cpu.s[0], (uint32_t)(int32_t)-7);
+
+    // VCVT.U32.F64 S0, D1: double→unsigned int
+    e.cpu.set_df(1, 42.7);
+    run_vfp(e, 0xEEBC, 0x0BC1);
+    ASSERT_EQ(e.cpu.s[0], 42u);
+}
+
+void test_vfp_cvt_f64_f32() {
+    MiniEnv e;
+    e.nvic.write(0xD88, Width::Word, 0x00F00000);
+    e.cpu.reset();
+
+    // VCVT.F64.F32 D0, S2: promote single→double
+    // Encoding: opc1=1011 D=0 opc2=0111 Vd=0 1011 opc3=11 M Vm
+    // S2: Vm=1, M=0 → hw2 has M=0, Vm=1
+    // hw1=EEB7 (1110 1110 1011 0111), hw2=0AC1 → wait that's single
+    // For F64.F32: result is double (cp=11), source is single
+    // Actually VCVT.F64.F32 Dd, Sm: is in misc_single with opc2=7, opc3[0]=1
+    // But the result goes to a double register...
+    // ARM ARM: VCVT.F64.F32 is encoded with cp=10 (single) in the instruction,
+    // but writes to double register Dd
+    // hw1 = 0xEEB7, hw2 = 0x0AC0 | M<<5 | Vm
+    // S2: Vm=1, M=0 → hw2 = 0x0AC1
+    set_sf(e.cpu, 2, 3.0f);
+    run_vfp(e, 0xEEB7, 0x0AC1); // VCVT.F64.F32 D0, S2
+    ASSERT_EQ((int)(e.cpu.df(0) * 10), 30);
+
+    // VCVT.F32.F64 S0, D1: demote double→single
+    // opc2=0111, opc3=01, cp=11 (double source)
+    // D1: Vm=1, M=0
+    // hw1=EEB7 (opc2=7 in bits[19:16]), hw2=0B41
+    // Wait: actually for F32.F64 it's in misc_double, opc2=7, opc3[0]=0
+    // hw1 = 0xEEB7, hw2 = 0x0B41 → No, opc3=01 for F32.F64
+    // Actually: opc3[0]=0 means F32.F64
+    // hw2 = Vd<<12 | 1011 | 0 | 1 | M<<5 | 0 | Vm
+    // S0: D=0, Vd=0 → hw2[15:12]=0, but Sd encoding is different
+    // For VCVT.F32.F64 Sd, Dm: Sd = D:Vd, Dm = M:Vm
+    // In the double misc context: the result is single
+    // This is confusing. Let me just objdump verify.
+    e.cpu.set_df(1, 7.0);
+    run_vfp(e, 0xEEB7, 0x0B41); // VCVT.F32.F64 S0, D1
+    ASSERT_EQ((int)(get_sf(e.cpu, 0) * 10), 70);
+}
+
+void test_vfp_vldr_vstr_double() {
+    MiniEnv e;
+    e.nvic.write(0xD88, Width::Word, 0x00F00000);
+    e.cpu.reset();
+
+    // VLDR.64 D0, [R0]: load 8 bytes into D0
+    // First store 3.14 at RAM address 0x200
+    e.cpu.set_df(0, 3.14);
+    uint32_t lo = e.cpu.s[0], hi = e.cpu.s[1];
+    e.ram.data()[0x200] = lo; e.ram.data()[0x201] = lo >> 8;
+    e.ram.data()[0x202] = lo >> 16; e.ram.data()[0x203] = lo >> 24;
+    e.ram.data()[0x204] = hi; e.ram.data()[0x205] = hi >> 8;
+    e.ram.data()[0x206] = hi >> 16; e.ram.data()[0x207] = hi >> 24;
+
+    // Clear D0, set R0 = 0x20000200
+    e.cpu.set_df(0, 0.0);
+    e.cpu.r[0] = 0x20000200;
+
+    // VLDR.64 D0, [R0, #0]: hw1=ED90, hw2=0B00
+    run_vfp(e, 0xED90, 0x0B00);
+    ASSERT_EQ((int)(e.cpu.df(0) * 100), 314);
+
+    // VSTR.64 D0, [R0, #8]: write to offset 8 = 0x20000208
+    // hw1=ED80, hw2=0B02 (imm8=2 → offset=8)
+    run_vfp(e, 0xED80, 0x0B02);
+    // Verify by reading back
+    uint32_t r_lo = e.ram.data()[0x208] | (e.ram.data()[0x209] << 8) |
+                    (e.ram.data()[0x20A] << 16) | (e.ram.data()[0x20B] << 24);
+    ASSERT_EQ(r_lo, lo);
+}
+
 int main() {
     RUN(test_reset);
     RUN(test_flags);
@@ -1107,5 +1441,24 @@ int main() {
     RUN(test_vfp_vldr_vstr);
     RUN(test_vfp_vcmp);
     RUN(test_vmov_core_to_fpu);
+    // VFP single-precision complete coverage
+    RUN(test_vfp_vsub);
+    RUN(test_vfp_vdiv);
+    RUN(test_vfp_vnmul);
+    RUN(test_vfp_vmla_vmls);
+    RUN(test_vfp_vnmla);
+    RUN(test_vfp_vnmls);
+    RUN(test_vfp_vfma);
+    RUN(test_vfp_vfms);
+    RUN(test_vfp_vfnma);
+    RUN(test_vfp_vfnms);
+    // VFP double-precision
+    RUN(test_vfp_double_arith);
+    RUN(test_vfp_double_fma);
+    RUN(test_vfp_double_negmul);
+    RUN(test_vfp_double_misc);
+    RUN(test_vfp_double_cvt);
+    RUN(test_vfp_cvt_f64_f32);
+    RUN(test_vfp_vldr_vstr_double);
     TEST_REPORT();
 }
