@@ -116,6 +116,27 @@ public:
         }
         return {};
     }
+
+    uint64_t next_event(uint64_t now) const override {
+        if (!running_ || mode_ != 0) return UINT64_MAX;
+        // Only report events if interrupts or shorts are configured
+        if (!inten_ && !shorts_) return UINT64_MAX;
+        uint64_t divisor = 4ULL << prescaler_;
+        uint32_t mask = bitmask();
+        uint64_t min_ticks = UINT64_MAX;
+        for (int i = 0; i < 6; i++) {
+            // Only care about CCs with enabled interrupts or shorts
+            bool relevant = (inten_ & (1u << (16 + i))) || (shorts_ & (1u << i)) || (shorts_ & (1u << (i + 8)));
+            if (!relevant) continue;
+            uint32_t target = cc_[i] & mask;
+            uint32_t dist = (target - counter_) & mask;
+            if (dist == 0) dist = mask + 1;
+            if (dist < min_ticks) min_ticks = dist;
+        }
+        if (min_ticks == UINT64_MAX) return UINT64_MAX;
+        uint64_t remainder = (now > last_tick_) ? (now - last_tick_) % divisor : 0;
+        return now + min_ticks * divisor - remainder;
+    }
 };
 
 // nRF52 RTC (Real-Time Counter) — 24-bit, 32.768kHz / (PRESCALER+1)
@@ -213,6 +234,27 @@ public:
             return Interrupt{irq_};
         }
         return {};
+    }
+
+    uint64_t next_event(uint64_t now) const override {
+        if (!running_ || !inten_) return UINT64_MAX;
+        uint64_t divisor = 1953ULL * (prescaler_ + 1);
+        // TICK interrupt fires every RTC tick
+        if (inten_ & 1) {
+            uint64_t remainder = (now > last_tick_) ? (now - last_tick_) % divisor : 0;
+            return now + divisor - remainder;
+        }
+        // Find nearest CC match with enabled interrupt
+        uint64_t min_ticks = UINT64_MAX;
+        for (int i = 0; i < 4; i++) {
+            if (!(inten_ & (1u << (16 + i)))) continue;
+            uint32_t dist = (cc_[i] - counter_) & 0xFFFFFF;
+            if (dist == 0) dist = 0x1000000;
+            if (dist < min_ticks) min_ticks = dist;
+        }
+        if (min_ticks == UINT64_MAX) return UINT64_MAX;
+        uint64_t remainder = (now > last_tick_) ? (now - last_tick_) % divisor : 0;
+        return now + min_ticks * divisor - remainder;
     }
 };
 

@@ -17,6 +17,7 @@ struct Device {
     virtual uint32_t read(uint32_t addr, Width w) = 0;
     virtual void write(uint32_t addr, Width w, uint32_t val) = 0;
     virtual std::optional<Interrupt> tick(uint64_t /*cycles*/) { return {}; }
+    virtual uint64_t next_event(uint64_t /*now*/) const { return UINT64_MAX; }
 };
 
 class Bus {

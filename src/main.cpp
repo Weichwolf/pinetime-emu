@@ -20,6 +20,7 @@
 #include "device/spi_flash.hpp"
 #include "device/egu.hpp"
 #include <SDL2/SDL.h>
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -278,19 +279,41 @@ struct EmulatorContext {
             if (rising & (1u << PineDef::SPI_FLASH_CS))
                 ext_flash.reset_cmd();
         });
+
+        init_tickable();
+    }
+
+    // All tickable peripherals
+    static constexpr int NUM_TICKABLE = 10;
+    pt::Device* tickable_[NUM_TICKABLE];
+    int num_tickable_ = 0;
+
+    void init_tickable() {
+        tickable_[num_tickable_++] = &nvic;
+        tickable_[num_tickable_++] = &timer0;
+        tickable_[num_tickable_++] = &timer1;
+        tickable_[num_tickable_++] = &timer2;
+        tickable_[num_tickable_++] = &rtc0;
+        tickable_[num_tickable_++] = &rtc1;
+        tickable_[num_tickable_++] = &rtc2;
+        tickable_[num_tickable_++] = &rng;
+        tickable_[num_tickable_++] = &temp;
+        tickable_[num_tickable_++] = &ppi;
     }
 
     void tick_peripherals() {
-        nvic.tick(cpu.cycles);
-        timer0.tick(cpu.cycles);
-        timer1.tick(cpu.cycles);
-        timer2.tick(cpu.cycles);
-        rtc0.tick(cpu.cycles);
-        rtc1.tick(cpu.cycles);
-        rtc2.tick(cpu.cycles);
-        rng.tick(cpu.cycles);
-        temp.tick(cpu.cycles);
-        ppi.tick(cpu.cycles);
+        for (int i = 0; i < num_tickable_; i++)
+            tickable_[i]->tick(cpu.cycles);
+    }
+
+    // Returns the earliest cycle at which any peripheral needs attention
+    uint64_t next_peripheral_event() const {
+        uint64_t earliest = UINT64_MAX;
+        for (int i = 0; i < num_tickable_; i++) {
+            uint64_t ev = tickable_[i]->next_event(cpu.cycles);
+            if (ev < earliest) earliest = ev;
+        }
+        return earliest;
     }
 };
 
@@ -327,7 +350,11 @@ static int run_headless(EmulatorContext& emu, uint32_t timeout_ms, bool trace) {
     uint64_t next_snap = start + 64'000'000;
 
     while (emu.cpu.cycles - start < max_cycles && !emu.cpu.halted) {
-        uint64_t target = emu.cpu.cycles + 10000;
+        uint64_t next_ev = emu.next_peripheral_event();
+        uint64_t limit = emu.cpu.cycles + 10000; // Max batch for responsiveness
+        uint64_t target = std::min({next_ev, limit, start + max_cycles});
+        if (target <= emu.cpu.cycles) target = emu.cpu.cycles + 1;
+
         if (emu.cpu.wfi) {
             emu.cpu.cycles = target;
             emu.tick_peripherals();
@@ -600,17 +627,19 @@ static int run_interactive(EmulatorContext& emu) {
             }
         }
 
-        // Run CPU for one frame
-        uint64_t target = emu.cpu.cycles + CYCLES_PER_FRAME;
-        while (emu.cpu.cycles < target && !emu.cpu.halted) {
+        // Run CPU for one frame (event-driven scheduling)
+        uint64_t frame_target = emu.cpu.cycles + CYCLES_PER_FRAME;
+        while (emu.cpu.cycles < frame_target && !emu.cpu.halted) {
+            uint64_t next_ev = emu.next_peripheral_event();
+            uint64_t limit = emu.cpu.cycles + 10000;
+            uint64_t batch = std::min({next_ev, limit, frame_target});
+            if (batch <= emu.cpu.cycles) batch = emu.cpu.cycles + 1;
+
             if (emu.cpu.wfi) {
-                // Advance time in batches so peripherals can fire interrupts
-                uint64_t batch = std::min<uint64_t>(emu.cpu.cycles + 10000, target);
                 emu.cpu.cycles = batch;
                 emu.tick_peripherals();
                 emu.cpu.check_exceptions();
             } else {
-                uint64_t batch = std::min<uint64_t>(emu.cpu.cycles + 10000, target);
                 emu.cpu.run(batch);
                 emu.tick_peripherals();
                 emu.cpu.check_exceptions();

@@ -161,12 +161,18 @@ Ziel: Korrektheit gegen ISA-Spec, nicht nur gegen InfiniTime.
 - ✓ Fault-Handler getrennt (UsageFault/BusFault/MemManage mit SHCSR-Enable, CFSR/HFSR W1C, Escalation zu HardFault)
 - ✓ 10 ARM-Testsuites (191 Tests) + 43 C++ Unit-Tests, InfiniTime-Boot verifiziert
 
-### Phase 2: Event-Scheduler — ⬚ offen (höchster ROI)
+### Phase 2: Event-Scheduler — ✓ abgeschlossen
 Ziel: Timing-korrekte Peripheral-Interaktion statt 10k-Zyklus-Batches.
-- ⬚ Event-Queue: Peripheral meldet `next_event() → uint64_t`
-- ⬚ CPU läuft bis zum nächsten Event, nicht bis zum Batch-Ende
-- ⬚ Eliminiert Polling-Timing-Bugs (RNG, SysTick, DMA-Completion)
-- ⬚ ~200 Zeilen Scheduler, tick()-Signatur anpassen
+- ✓ `Device::next_event(now) → uint64_t` virtuelle Methode in bus.hpp
+- ✓ CPU läuft bis min(next_event, 10k-batch, frame_end) — event-driven
+- ✓ Timer: next_event nur bei aktivem Interrupt/Short auf relevante CC-Matches
+- ✓ RTC: next_event bei TICK-Interrupt oder CC-Match mit enabletem Interrupt
+- ✓ SysTick: next_event = now + CVR (verbleibende Zyklen bis Underflow)
+- ✓ RNG/TEMP: next_event = now + delay (Verzögerung bis VALRDY/DATARDY)
+- ✓ PPI: kein next_event (pollt Event-Register, läuft bei jedem tick)
+- ✓ `EmulatorContext::next_peripheral_event()` sammelt frühestes Event
+- ✓ Headless + Interactive Loop beide event-driven
+- ✓ InfiniTime Boot identisch (8321px, 5116 Ticks), Performance ~32M cy/s
 
 ### Phase 3: Peripherals vertiefen — ⬚ offen
 Ziel: Korrektheit für beliebige nRF52-Firmware, nicht nur InfiniTime.
@@ -219,7 +225,6 @@ Nach jedem Fortschritt (neue Peripherals, Bug-Fixes, bestandene Tests):
 
 - Performance ~1x Echtzeit (interpretiert, kein Decode-Cache)
 - Watchface zeigt 00:00 (kein RTC time-of-day)
-- tick_peripherals() alle 10k Zyklen (zu grob für Polling-Peripherals)
 
 ## Nicht-Ziele (aktuell)
 
