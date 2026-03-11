@@ -709,6 +709,7 @@ static void usage(const char* prog) {
     fprintf(stderr, "  --headless          Run without display\n");
     fprintf(stderr, "  --timeout <ms>      Timeout in headless mode (default: 5000)\n");
     fprintf(stderr, "  --ble-hci [port]    BLE HCI over TCP (default port: 9001)\n");
+    fprintf(stderr, "  --companion         Auto-sync time, music, notifications, weather\n");
 }
 
 int main(int argc, char* argv[]) {
@@ -717,6 +718,7 @@ int main(int argc, char* argv[]) {
     bool trace = false;
     uint32_t timeout_ms = 5000;
     int ble_hci_port = 0; // 0 = disabled
+    bool companion = false;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--headless") == 0) headless = true;
@@ -726,6 +728,7 @@ int main(int argc, char* argv[]) {
             ble_hci_port = 9001;
             if (i + 1 < argc && argv[i+1][0] >= '0' && argv[i+1][0] <= '9') ble_hci_port = atoi(argv[++i]);
         }
+        else if (strcmp(argv[i], "--companion") == 0) companion = true;
         else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) { usage(argv[0]); return 0; }
         else if (argv[i][0] != '-') firmware_path = argv[i];
         else { fprintf(stderr, "Unknown option: %s\n", argv[i]); usage(argv[0]); return 1; }
@@ -749,6 +752,11 @@ int main(int argc, char* argv[]) {
             fprintf(stderr, "[BLE-HCI] Failed to start on port %d\n", ble_hci_port);
             return 1;
         }
+    }
+
+    if (companion) {
+        emu.ble_hci.set_companion_mode(true);
+        fprintf(stderr, "[EMU] Companion mode: will auto-sync time, music, notifications, weather\n");
     }
 
     if (headless)

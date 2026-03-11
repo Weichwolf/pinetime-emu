@@ -23,7 +23,7 @@ enable_testing()
 set(DEVICE_TESTS
     memory nvic clock_power gpio timer spim twim nvmc
     radio ppi saadc temp rng ecb wdt st7789 i2c_devices
-    spi_flash egu uarte ble_hci
+    spi_flash egu uarte ble_hci ble_companion
 )
 
 foreach(name ${DEVICE_TESTS})

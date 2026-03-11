@@ -1,6 +1,7 @@
 #pragma once
 #include "../bus.hpp"
 #include "radio.hpp"
+#include "ble_companion.hpp"
 #include <array>
 #include <cstdio>
 #include <cstring>
@@ -92,6 +93,11 @@ class BleHci {
     uint8_t our_sn_ = 0;    // Our SN for outgoing PDUs
     uint8_t our_nesn_ = 0;  // Our NESN (next expected from peer)
 
+    // Companion mode
+    BleCompanion companion_;
+    bool companion_mode_ = false;
+    bool companion_started_ = false;
+
     // I/O buffers
     std::vector<uint8_t> tx_buf_;
     std::vector<uint8_t> rx_buf_;
@@ -108,6 +114,7 @@ public:
         radio_ = r;
         if (r) r->set_tx_handler(radio_tx_cb, this);
     }
+    void set_companion_mode(bool on) { companion_mode_ = on; }
 
     bool start(uint16_t port = 9001) {
         port_ = port;
@@ -162,6 +169,7 @@ public:
     const AdvCapture& last_adv() const { return last_adv_; }
     bool is_scanning() const { return scanning_; }
     bool is_connected() const { return connected_; }
+    bool is_companion_done() const { return companion_.is_done(); }
 
 private:
     // ================================================================
@@ -203,12 +211,27 @@ private:
         // Update local_addr_ from captured advertising (this is the device's address)
         memcpy(local_addr_, last_adv_.addr, 6);
 
+        // Auto-connect in companion mode on first ADV_IND
+        if (companion_mode_ && !connecting_ && !connected_ && pdu_type == ADV_IND) {
+            connecting_ = true;
+            fprintf(stderr, "[Companion] Auto-connecting to %02X:%02X:%02X:%02X:%02X:%02X\n",
+                    last_adv_.addr[5], last_adv_.addr[4], last_adv_.addr[3],
+                    last_adv_.addr[2], last_adv_.addr[1], last_adv_.addr[0]);
+        }
+
         // If we're connecting, inject CONNECT_IND on the next RX window
         if (connecting_ && pdu_type == ADV_IND) {
             uint8_t conn_pdu[40];
             size_t conn_len;
             build_connect_ind(conn_pdu, &conn_len);
             radio_->queue_rx(conn_pdu, conn_len);
+            connecting_ = false;
+            connected_ = true;
+            our_sn_ = our_nesn_ = 0;
+            if (!companion_mode_)
+                send_connection_complete();
+            fprintf(stderr, "[BLE-HCI] Connected (handle=0x%04X)%s\n",
+                    conn_handle_, companion_mode_ ? " [companion]" : "");
         }
     }
 
@@ -218,30 +241,61 @@ private:
         uint8_t pdu_len = pdu[1];
         uint8_t llid = header & 0x03;
         uint8_t sn = (header >> 3) & 1;
-        // uint8_t nesn = (header >> 2) & 1;
 
         // Acknowledge: update our NESN
         if (sn == our_nesn_) {
             our_nesn_ ^= 1;
 
             if (llid == 0x03 && pdu_len >= 1) {
-                // LL Control PDU
                 handle_ll_control(pdu + 2, pdu_len);
             } else if ((llid == 0x01 || llid == 0x02) && pdu_len > 0) {
-                // L2CAP data → HCI ACL
-                send_acl_data(conn_handle_, pdu + 2, pdu_len);
+                if (companion_mode_) {
+                    // Route L2CAP to companion: strip L2CAP header (len(2)+CID(2)) → ATT
+                    const uint8_t* l2cap = pdu + 2;
+                    if (pdu_len >= 4) {
+                        uint16_t l2cap_len = l2cap[0] | (l2cap[1] << 8);
+                        uint16_t cid = l2cap[2] | (l2cap[3] << 8);
+                        if (cid == 0x0004 && l2cap_len > 0 && 4 + l2cap_len <= pdu_len) {
+                            if (!companion_started_) {
+                                companion_started_ = true;
+                                companion_.on_connected();
+                            }
+                            companion_.on_att_received(l2cap + 4, l2cap_len);
+                        }
+                    }
+                } else {
+                    send_acl_data(conn_handle_, pdu + 2, pdu_len);
+                }
             }
-            // llid==0x01 empty: keep-alive, ignore
         }
 
-        // Send empty ACK (or pending data) back
-        // Queue an empty PDU to acknowledge
+        // Send response: companion data or empty ACK
         if (radio_) {
-            uint8_t ack[2];
-            ack[0] = 0x01 | (our_nesn_ << 2) | (our_sn_ << 3); // LLID=01 (empty), NESN, SN
-            ack[1] = 0; // empty
-            radio_->queue_rx(ack, 2);
+            if (companion_mode_ && companion_started_ && companion_.has_pending()) {
+                send_att_to_device();
+            } else {
+                uint8_t ack[2];
+                ack[0] = 0x01 | (our_nesn_ << 2) | (our_sn_ << 3);
+                ack[1] = 0;
+                radio_->queue_rx(ack, 2);
+            }
         }
+    }
+
+    void send_att_to_device() {
+        uint8_t att[256];
+        size_t att_len = companion_.get_pending(att);
+        if (att_len == 0) return;
+
+        // Wrap: data channel PDU [ header(1) | len(1) | L2CAP_len(2) | CID(2) | ATT... ]
+        uint8_t pdu[265];
+        pdu[0] = 0x02 | (our_nesn_ << 2) | (our_sn_ << 3); // LLID=10 (L2CAP start)
+        pdu[1] = 4 + att_len; // L2CAP header + ATT
+        pdu[2] = att_len; pdu[3] = att_len >> 8; // L2CAP length
+        pdu[4] = 0x04; pdu[5] = 0x00; // CID = 0x0004 (ATT)
+        memcpy(pdu + 6, att, att_len);
+        our_sn_ ^= 1;
+        radio_->queue_rx(pdu, 6 + att_len);
     }
 
     // ================================================================
@@ -703,12 +757,7 @@ private:
         buf[17] = conn_timeout_ >> 8;
         buf[18] = 0; // Central_Clock_Accuracy
 
-        connecting_ = false;
-        connected_ = true;
-        our_sn_ = our_nesn_ = 0;
-
         send_event(0x3E, buf, 19);
-        fprintf(stderr, "[BLE-HCI] Connected (handle=0x%04X)\n", conn_handle_);
     }
 
     void send_acl_data(uint16_t handle, const uint8_t* data, size_t len) {

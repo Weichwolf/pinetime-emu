@@ -27,6 +27,7 @@ pinetime-emu/
 │       ├── nvmc.hpp          # Flash Controller (CONFIG/ERASEPAGE)
 │       ├── radio.hpp         # BLE Radio (State Machine, TX Capture, RX Injection)
 │       ├── ble_hci.hpp       # BLE HCI over TCP (H4 Transport, ADV/Data Bridge)
+│       ├── ble_companion.hpp # Virtual Companion (ATT/GATT Client, auto-sync)
 │       ├── ppi.hpp           # PPI (Programmable Peripheral Interconnect)
 │       ├── saadc.hpp         # SAADC (ADC, simuliert Batteriespannung)
 │       ├── temp.hpp          # TEMP (Die-Temperatur, 21°C)
@@ -61,7 +62,7 @@ pinetime-emu/
 
 ```bash
 cmake -B build -G Ninja . && ninja -C build          # Emulator + alle Tests
-ctest --test-dir build                                # 36 Suites (24 C++ + 12 ARM)
+ctest --test-dir build                                # 37 Suites (25 C++ + 12 ARM)
 make -C tests/arm                                     # ARM-Tests standalone
 ```
 
@@ -71,6 +72,7 @@ make -C tests/arm                                     # ARM-Tests standalone
 ./build/pinetime-emu firmware.bin                     # Interaktiv (SDL2)
 ./build/pinetime-emu --headless --timeout 5000 fw.bin # Headless
 ./build/pinetime-emu --ble-hci firmware.bin           # Mit BLE HCI on port 9001
+./build/pinetime-emu --companion firmware.bin         # Auto-sync Zeit/Musik/Notif/Wetter
 ```
 
 ## Build-Umgebung
@@ -157,7 +159,7 @@ Tests terminieren via BKPT. R0=0 = PASS, R0=N = Test N fehlgeschlagen.
 - WFI/WFE Wakeup trotz PRIMASK: Pending Interrupts wecken CPU aus WFI/WFE auch bei PRIMASK=1.
 - NVIC Event Register: Interrupts setzen event_reg für WFE-Wakeup.
 
-**Tests**: 36 Suites (24 C++ + 12 ARM).
+**Tests**: 37 Suites (25 C++ + 12 ARM).
 
 ## Roadmap: Produktiver Emulator
 
@@ -226,6 +228,17 @@ Ziel: BLE-Kommunikation mit externem Host-Stack (Gadgetbridge, Bumble, BlueZ).
 - ✓ LL Control PDU Handling (VERSION_IND, FEATURE_REQ/RSP, LENGTH_REQ/RSP, PHY_REQ, PING, TERMINATE, UNKNOWN_RSP)
 - ✓ 47 Unit-Tests (HCI Commands, ADV Capture, Report Generation, RX Injection, Queue)
 
+**Virtual Companion** (`--companion`):
+- ✓ Auto-Connect bei erstem ADV_IND (kein externer Host nötig)
+- ✓ ATT/GATT Client: MTU Exchange → Service Discovery → Characteristic Discovery → Writes
+- ✓ CTS (0x1805): System-Uhrzeit synchronisieren (CTS Current Time Format)
+- ✓ ANS (0x1811): Notification "Emulator ready" (New Alert)
+- ✓ Music Service (InfiniTime custom UUID): Track/Artist/Album/Status
+- ✓ Weather Service (InfiniTime custom UUID): 21.5°C, Few Clouds, Berlin
+- ✓ Device-initiated MTU Request Handling (deferred svc discovery start)
+- ✓ 42 Unit-Tests (State Machine, Full Flow, Partial Services, Time Format)
+- Offen: Benötigt SoftDevice BLE Advertising (Radio-Emulation noch nicht vollständig)
+
 ### Bestandsaufnahme (was steht, was nicht)
 | Komponente | Status | Produktiv-tauglich? |
 |-----------|--------|---------------------|
@@ -237,6 +250,7 @@ Ziel: BLE-Kommunikation mit externem Host-Stack (Gadgetbridge, Bumble, BlueZ).
 | Exception Model | ✓ ~98% | Ja — FPU Stacking, Faults, MPU, Exclusive Monitor |
 | nRF52 Peripherals | ✓ Happy Path | Nein — Error Handling, Timing fehlt |
 | BLE HCI Bridge | ✓ | Ja — ADV Capture, Connection, Data Channel, LL Control |
+| Virtual Companion | ✓ | Ja — ATT/GATT Client, Zeit/Musik/Notif/Wetter sync |
 | Test-Infrastruktur | ✓ | Ja — C++ + ARM dual-system |
 
 ## Workflow
