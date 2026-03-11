@@ -171,49 +171,64 @@ private:
         if (pending) nvic_->set_pending(irq_);
     }
 
+    // nRF52 RADIO states
+    enum State {
+        DISABLED = 0, RXRU = 1, RXIDLE = 2, RX = 3, RXDISABLE = 4,
+        TXRU = 9, TXIDLE = 10, TX = 11, TXDISABLE = 12
+    };
+
     void do_txen() {
-        state_ = 11; // TXRU
+        state_ = TXRU;
+        // Instant ramp-up (no timing)
+        state_ = TXIDLE;
         ev_ready_ = 1;
-        state_ = 11; // TXIDLE after ramp-up
         if (shorts_ & (1<<0)) do_start(); // READY_START
         fire_irq();
     }
 
     void do_rxen() {
-        state_ = 1; // RXRU
+        state_ = RXRU;
+        state_ = RXIDLE;
         ev_ready_ = 1;
-        state_ = 3; // RXIDLE
         if (shorts_ & (1<<0)) do_start(); // READY_START
         fire_irq();
     }
 
     void do_start() {
-        // TX: instantly complete, RX: stay listening (no packets)
-        if (state_ >= 9) { // TX states
-            state_ = 12; // TX
+        if (state_ == TXIDLE) {
+            state_ = TX;
             ev_address_ = 1;
             ev_payload_ = 1;
             ev_end_ = 1;
-            state_ = 11; // TXIDLE
+            state_ = TXIDLE; // Back to idle after instant TX
             if (shorts_ & (1<<1)) do_disable(); // END_DISABLE
-            fire_irq();
-        } else {
-            state_ = 2; // RX — stay in RX, no packets arrive
+            else fire_irq();
+        } else if (state_ == RXIDLE) {
+            state_ = RX; // Stay in RX, no packets arrive
         }
     }
 
     void do_stop() {
-        state_ = 0;
-        ev_disabled_ = 1;
-        fire_irq();
+        if (state_ == RX) state_ = RXIDLE;
+        else if (state_ == TX) state_ = TXIDLE;
+        // Then auto-disable
+        do_disable();
     }
 
+    bool in_disable_ = false;
+
     void do_disable() {
-        state_ = 0;
+        if (in_disable_) return; // Prevent re-entrant loop
+        in_disable_ = true;
+        if (state_ >= TXRU) state_ = TXDISABLE;
+        else if (state_ >= RXRU) state_ = RXDISABLE;
+        state_ = DISABLED;
         ev_disabled_ = 1;
-        // DISABLED_TXEN/RXEN shorts — don't auto-loop in emulation
-        (void)(shorts_ & ((1<<6) | (1<<7)));
         fire_irq();
+        // DISABLED shorts for TX/RX chaining (NimBLE uses these)
+        if (shorts_ & (1<<2)) do_txen();       // DISABLED_TXEN
+        else if (shorts_ & (1<<3)) do_rxen();   // DISABLED_RXEN
+        in_disable_ = false;
     }
 };
 

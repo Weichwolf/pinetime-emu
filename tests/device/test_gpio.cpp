@@ -66,16 +66,41 @@ void test_latch() {
     ASSERT_EQ(gpio.read(0x520, Width::Word) & (1u << 2), 0u);
 }
 
-void test_sense_auto_toggle() {
+void test_sense_detect_edge() {
     GPIO gpio;
-    // Set SENSE=High (2) on pin 0
+    GPIOTE gpiote;
+    NVIC nvic;
+    gpio.set_gpiote(&gpiote);
+    gpiote.set_gpio(&gpio);
+    gpiote.set_nvic(&nvic, 6);
+
+    // Enable PORT interrupt
+    gpiote.write(0x304, Width::Word, 1u << 31);
+
+    // SENSE=High on pin 0: PORT fires when pin goes high
     gpio.write(0x700, Width::Word, 0x00020000);
-    gpio.set_pin(0, true); // pin is high
-    // Read PIN_CNF[0]: should return original value but toggle internally
+    ASSERT_EQ(gpiote.get_ev_port(), 0u); // No event yet
+
+    gpio.set_pin(0, true); // DETECT rises → PORT
+    ASSERT_EQ(gpiote.get_ev_port(), 1u);
+
+    // Clear PORT, pin stays high, SENSE stays High → DETECT still active
+    gpiote.write(0x17C, Width::Word, 0);
+
+    // Pin goes low → DETECT falls, no PORT (falling edge of DETECT)
+    gpio.set_pin(0, false);
+    ASSERT_EQ(gpiote.get_ev_port(), 0u); // No new PORT
+
+    // Firmware toggles SENSE to Low (to catch next low)
+    gpio.write(0x700, Width::Word, 0x00030000);
+    // Pin is already low, SENSE=Low → DETECT rises → PORT!
+    ASSERT_EQ(gpiote.get_ev_port(), 1u);
+
+    // Read PIN_CNF — returns original, but auto-toggles SENSE internally
+    // (pin is low, SENSE=Low matches → toggle to High for next edge)
     uint32_t val = gpio.read(0x700, Width::Word);
-    ASSERT_EQ((val >> 16) & 3, 2u); // Returns original
-    // After read, internal should be toggled to Low (3)
-    ASSERT_EQ((gpio.pin_cnf(0) >> 16) & 3, 3u);
+    ASSERT_EQ((val >> 16) & 3, 3u); // Returns original SENSE=Low
+    ASSERT_EQ((gpio.pin_cnf(0) >> 16) & 3, 2u); // Internally toggled to High
 }
 
 void test_gpiote_event_mode() {
@@ -113,6 +138,9 @@ void test_gpiote_port_event() {
     // Enable PORT interrupt (bit 31)
     gpiote.write(0x304, Width::Word, 1u << 31);
 
+    // Set SENSE=High on pin 10 so DETECT fires when pin goes high
+    gpio.write(0x700 + 10*4, Width::Word, 0x00020000);
+
     gpio.set_pin(10, true);
     ASSERT_EQ(gpiote.get_ev_port(), 1u);
     ASSERT(nvic.is_pending(6));
@@ -127,31 +155,40 @@ void test_gpiote_inten() {
 }
 
 void test_sense_toggle_cycle() {
-    // Critical InfiniTime path: SENSE toggles High->Low->High for successive gestures
+    // InfiniTime-style: firmware reads PIN_CNF (auto-toggle), never writes SENSE
     GPIO gpio;
-    // Pin 0: SENSE=High (2)
-    gpio.write(0x700, Width::Word, 0x00020000);
+    GPIOTE gpiote;
+    NVIC nvic;
+    gpio.set_gpiote(&gpiote);
+    gpiote.set_gpio(&gpio);
+    gpiote.set_nvic(&nvic, 6);
+    gpiote.write(0x304, Width::Word, 1u << 31); // Enable PORT
 
-    // First touch: pin goes high -> SENSE matches
-    gpio.set_pin(0, true);
-    ASSERT(gpio.read(0x520, Width::Word) & 1); // LATCH set
+    // Pin 0: SENSE=Low (3) — detect when pin goes low (like CST816S)
+    gpio.write(0x700, Width::Word, 0x00030000);
 
-    // ISR reads PIN_CNF[0] -> toggles SENSE to Low (3)
-    gpio.read(0x700, Width::Word);
-    ASSERT_EQ((gpio.pin_cnf(0) >> 16) & 3, 3u); // Now SENSE=Low
-
-    // Release: pin goes low -> SENSE=Low matches
+    // Touch down: pin goes low → DETECT rises → PORT
     gpio.set_pin(0, false);
-    ASSERT(gpio.read(0x520, Width::Word) & 1); // LATCH set again
-
-    // ISR reads PIN_CNF[0] -> toggles SENSE back to High (2)
-    gpio.write(0x520, Width::Word, 1); // Clear latch
-    gpio.read(0x700, Width::Word);
-    ASSERT_EQ((gpio.pin_cnf(0) >> 16) & 3, 2u); // Back to SENSE=High
-
-    // Second touch: works again
-    gpio.set_pin(0, true);
     ASSERT(gpio.read(0x520, Width::Word) & 1);
+    ASSERT_EQ(gpiote.get_ev_port(), 1u);
+
+    // ISR: clear PORT, read PIN_CNF (auto-toggles SENSE Low→High)
+    gpiote.write(0x17C, Width::Word, 0);
+    gpio.read(0x700, Width::Word);
+    ASSERT_EQ((gpio.pin_cnf(0) >> 16) & 3, 2u); // Toggled to High
+
+    // Touch release: pin goes high → SENSE=High matches → DETECT rises → PORT
+    gpio.set_pin(0, true);
+    ASSERT_EQ(gpiote.get_ev_port(), 1u);
+
+    // ISR: clear PORT, read PIN_CNF (auto-toggles SENSE High→Low)
+    gpiote.write(0x17C, Width::Word, 0);
+    gpio.read(0x700, Width::Word);
+    ASSERT_EQ((gpio.pin_cnf(0) >> 16) & 3, 3u); // Back to Low
+
+    // Second touch: pin goes low again → works
+    gpio.set_pin(0, false);
+    ASSERT_EQ(gpiote.get_ev_port(), 1u);
 }
 
 void test_gpiote_hitolo() {
@@ -265,7 +302,7 @@ int main() {
     RUN(test_in_reflects_inputs);
     RUN(test_in_shows_output_for_output_pins);
     RUN(test_latch);
-    RUN(test_sense_auto_toggle);
+    RUN(test_sense_detect_edge);
     RUN(test_gpiote_event_mode);
     RUN(test_gpiote_port_event);
     RUN(test_gpiote_inten);

@@ -321,14 +321,13 @@ void test_touch_release_irq_chain() {
     cst.set_touch(true, 100, 100);
     ASSERT(nvic.is_pending(6));
 
-    // Simulate ISR: clear pending, clear PORT event, read PIN_CNF to toggle SENSE
+    // Simulate ISR: clear pending, clear PORT event, read PIN_CNF (auto-toggles SENSE)
     nvic.clear_pending(6);
     gpiote.write(0x17C, Width::Word, 0);
     gpio.write(0x520, Width::Word, 1u << 28); // Clear latch
-    gpio.read(0x700 + 28*4, Width::Word); // Toggle SENSE: Low→High
+    gpio.read(0x700 + 28*4, Width::Word); // Auto-toggle SENSE: Low→High
 
-    // Now SENSE=High on pin 28
-    ASSERT_EQ((gpio.pin_cnf(28) >> 16) & 3, 2u); // Toggled to High
+    ASSERT_EQ((gpio.pin_cnf(28) >> 16) & 3, 2u);
 
     // Touch release: pin goes high → SENSE=High matches
     cst.set_touch(false, 0, 0);
@@ -384,18 +383,18 @@ void test_touch_multiple_gestures() {
         twim.write(0x008, Width::Word, 1);
         ASSERT_EQ(bus.read8(0x20000100), g);
 
-        // Clean up for next gesture
+        // Clean up for next gesture: read PIN_CNF (auto-toggles SENSE)
         nvic.clear_pending(6);
         gpiote.write(0x17C, Width::Word, 0);
         gpio.write(0x520, Width::Word, 1u << 28);
-        gpio.read(0x700 + 28*4, Width::Word); // Toggle SENSE
+        gpio.read(0x700 + 28*4, Width::Word); // Auto-toggle SENSE
 
         // Release
         cst.set_touch(false, 0, 0);
         nvic.clear_pending(6);
         gpiote.write(0x17C, Width::Word, 0);
         gpio.write(0x520, Width::Word, 1u << 28);
-        gpio.read(0x700 + 28*4, Width::Word); // Toggle back
+        gpio.read(0x700 + 28*4, Width::Word); // Auto-toggle back
     }
 }
 

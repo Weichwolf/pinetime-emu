@@ -31,7 +31,8 @@ pinetime-emu/
 │       ├── temp.hpp          # TEMP (Die-Temperatur, 21°C)
 │       ├── rng.hpp           # Random Number Generator (VALRDY events)
 │       ├── ecb.hpp           # AES-128 ECB Encryption
-│       ├── wdt.hpp           # Watchdog (akzeptiert Reload, kein Timeout)
+│       ├── uarte.hpp         # UARTE (UART mit EasyDMA, TX via Callback)
+│       ├── wdt.hpp           # Watchdog (Timeout, tick/next_event, Reload)
 │       ├── st7789.hpp        # ST7789 LCD Controller (240×240 RGB565 Framebuffer)
 │       └── i2c_devices.hpp   # CST816S Touch, HRS3300 HR, BMA4xx Accel
 ├── tests/
@@ -55,7 +56,7 @@ pinetime-emu/
 
 ```bash
 cmake -B build -G Ninja . && ninja -C build          # Emulator + alle Tests
-ctest --test-dir build                                # 30 Tests (22 C++ + 8 ARM)
+ctest --test-dir build                                # 31 Suites (23 C++ + 8 ARM), 364 Tests
 make -C tests/arm                                     # ARM-Tests standalone
 ```
 
@@ -111,6 +112,7 @@ Thumb-2 ISA, organisiert in Gruppen:
 | 0x40008000 | TIMER0 | timer.hpp |
 | 0x40009000 | TIMER1 | timer.hpp |
 | 0x4000A000 | TIMER2 | timer.hpp |
+| 0x40002000 | UARTE0 (Serial) | uarte.hpp |
 | 0x40010000 | WDT | wdt.hpp |
 | 0x40011000 | RTC0 | timer.hpp |
 | 0x40014000 | RTC1 | timer.hpp |
@@ -133,7 +135,7 @@ Tests terminieren via BKPT. R0=0 = PASS, R0=N = Test N fehlgeschlagen.
 ## Status
 
 **CPU**: Thumb-2 Core + VFPv4-D16 FPU (single+double precision). IT-Blöcke, Exceptions mit FPU Lazy Stacking, LDREX/STREX Exclusive Monitor, interrupt-driven scheduling. 9 ARM-Testsuites (181 Tests) + 43 C++ Unit-Tests bestehen.
-**Peripherals**: Alle nRF52-Peripherals implementiert: Radio, PPI, SAADC, TEMP, RNG, ECB, NVMC, SysTick, NVIC, SPIM, TWIM, Timers, RTCs, GPIO/GPIOTE, WDT, CLOCK/POWER.
+**Peripherals**: Alle nRF52-Peripherals implementiert: UARTE, Radio (korrekte State Machine), PPI, SAADC, TEMP, RNG, ECB, NVMC, SysTick, NVIC, SPIM, TWIM (ANACK-Erkennung), Timers, RTCs, GPIO/GPIOTE, WDT (Timeout+Reload), CLOCK/POWER.
 **PineTime**: ST7789 (SPI→Framebuffer→SDL2), CST816S Touch (WASD=Swipe, Maus=Tap, Space=Button), HRS3300, BMA4xx. Ext. SPI Flash 4MB.
 **Firmware**: `firmware/merged-internal.bin` — InfiniTime 1.14.1 + MCUBoot Bootloader.
 
@@ -142,12 +144,12 @@ Tests terminieren via BKPT. R0=0 = PASS, R0=N = Test N fehlgeschlagen.
 **Touch/Gesture Input**: ✓ Funktioniert. WASD für Swipe-Gesten (W=Up, S=Down, A=Left, D=Right), Maus für Tap, Space für Button. Touch-IRQ-Kette: CST816S → GPIO Pin 28 (active low) → GPIOTE PORT Event → NVIC IRQ 6 → FreeRTOS Task Notification → Gesture Processing → Display Update.
 
 **Kritische Emulations-Fixes**:
-- GPIO PIN_CNF SENSE Auto-Toggle: nrfx_gpiote's PORT-Handler liest PIN_CNF SENSE aber toggled es nicht (Firmware-Bug oder Compiler-Optimierung). Emulator emuliert das Toggle als Side-Effect bei PIN_CNF Read (gpio.hpp). Ohne Toggle: kein Release-Event → Touch State Machine hängt → nur erster Gesture funktioniert.
+- GPIO SENSE/DETECT: PORT event feuert auf DETECT Rising Edge (nicht auf jede Pin-Änderung). DETECT = OR aller Pins wo SENSE-Condition matched. Auto-Toggle: PIN_CNF Read toggled SENSE intern wenn Condition matched (InfiniTime's nrfx_gpiote toggled SENSE nicht selbst). Firmware die SENSE explizit schreibt: Write überschreibt Auto-Toggle.
 - CST816S Action Field: Register 0x03 Bits [7:6] korrekt setzen (0=Down, 1=Up). Nötig damit InfiniTime Touch-Releases erkennt.
 - WFI/WFE Wakeup trotz PRIMASK: Pending Interrupts wecken CPU aus WFI/WFE auch bei PRIMASK=1.
 - NVIC Event Register: Interrupts setzen event_reg für WFE-Wakeup.
 
-**Tests**: 10 ARM-Assembly-Suites (191 Tests) + 43 C++ Unit-Tests = 234 gesamt.
+**Tests**: 31 Suites (23 C++ + 8 ARM), 364 Tests gesamt.
 
 ## Roadmap: Produktiver Emulator
 
@@ -174,21 +176,16 @@ Ziel: Timing-korrekte Peripheral-Interaktion statt 10k-Zyklus-Batches.
 - ✓ Headless + Interactive Loop beide event-driven
 - ✓ InfiniTime Boot identisch (8321px, 5116 Ticks), Performance ~32M cy/s
 
-### Phase 3: Peripherals vertiefen — ⬚ offen
+### Phase 3: Peripherals vertiefen — ✓ abgeschlossen
 Ziel: Korrektheit für beliebige nRF52-Firmware, nicht nur InfiniTime.
-- ⬚ UARTE (Serial Output — essentiell für Debug)
-- ⬚ SPIM/TWIM: Error Conditions, NACK, Timeout
-- ⬚ RADIO: State Machine (DISABLED↔TXRU↔TX↔TXDISABLE↔RXRU↔RX↔...)
-- ⬚ BLE via HCI over TCP: RADIO TX/RX → HCI H4 Framing → TCP Server (:9001)
-  - Emulator = HCI Controller (Server), Host-Stack = Client
-  - BlueZ vhci, Bumble, oder eigene App als Gegenstelle
-  - Ermöglicht Test von Companion-Apps (Gadgetbridge, InfiniLink) gegen Emulator
-  - Schwierigkeit: SoftDevice steuert RADIO direkt, Übersetzung Register→HCI nötig
-- ⬚ GPIO: SENSE ohne Auto-Toggle-Hack, PIN_CNF vollständig
-- ⬚ NVMC: Write-Timing, READY-Flag
-- ⬚ DMA: Timing + Bus-Arbitrierung statt instant
-- ⬚ WDT: Timeout → Reset
-- ⬚ Timer: Korrekte Prescaler-Interaktion, alle Short-Chains
+- ✓ UARTE (EasyDMA TX, TX-Callback, STARTRX/STOPRX Events)
+- ✓ TWIM: ANACK-Erkennung bei unbekannter I2C-Adresse (errorsrc_ + ev_error_)
+- ✓ RADIO: Korrekte State Machine (DISABLED=0, RXRU=1, RXIDLE=2, RX=3, TXRU=9, TXIDLE=10, TX=11, TXDISABLE=12), DISABLED_TXEN/RXEN Shorts für TX/RX-Chaining
+- ✓ WDT: Timeout nach (CRV+1)*1953 Zyklen, tick/next_event, CRV/RREN/CONFIG locked nach START
+- ✓ GPIO SENSE: Korrekte DETECT Rising-Edge-Semantik + Auto-Toggle bei PIN_CNF Read (Kompatibilität mit Firmware die SENSE nicht selbst toggled)
+- — NVMC: Instant genügt (kein Timing nötig für InfiniTime/MCUBoot DFU)
+- — Timer Shorts: Waren schon komplett (COMPARE_CLEAR + COMPARE_STOP)
+- — DMA Timing: Instant genügt für alle aktuellen Firmware
 
 ### Phase 4: Tooling — ⬚ offen
 Ziel: Entwickler-Workflow statt Spielzeug.
@@ -202,6 +199,43 @@ Ziel: >5x Echtzeit.
 - ⬚ Cached Decode (Instruktion einmal dekodieren → Dispatch-Table, 3-5x)
 - ⬚ Block-Chaining (lineare Blöcke ohne Branches zusammenfassen)
 - ⬚ Optional: JIT (10-50x, aber eigenes Projekt)
+
+### Phase 6: BLE via HCI over TCP — ⬚ offen
+Ziel: BLE-Kommunikation mit externem Host-Stack (Gadgetbridge, Bumble, BlueZ).
+
+**Architektur:**
+- Emulator = HCI Controller (TCP Server :9001)
+- Externer Host-Stack = HCI Client
+- Protokoll: HCI H4 Framing (1 Byte Packet Indicator + HCI Packet)
+- SoftDevice steuert RADIO direkt → Übersetzung RADIO-Register → HCI nötig
+
+**Schichten:**
+1. **RADIO Capture** — TX-Pakete abfangen wenn RADIO in TX state, RX-Pakete injizieren
+2. **Link Layer** — BLE LL PDU Parsing (ADV_IND, CONNECT_IND, LL_DATA)
+3. **HCI Transport** — H4 Framing, Command/Event/ACL Multiplexing
+4. **TCP Server** — Non-blocking Socket, accept/read/write in tick()
+
+**Herausforderungen:**
+- SoftDevice ist Closed-Source Blob, steuert RADIO-Register direkt
+- Timing: BLE erwartet µs-genaue Antworten (Connection Interval, T_IFS=150µs)
+- State Tracking: SoftDevice's interner State muss aus Register-Writes inferiert werden
+- Advertising: SoftDevice setzt RADIO auf ADV-Channels (37/38/39), sendet ADV_IND
+- Connection: Nach CONNECT_IND wechselt SoftDevice auf Data Channels
+
+**Gegenstellen:**
+- `bumble` (Python BLE Stack) — flexibelste Option, HCI over TCP nativ
+- `BlueZ vhci` — Linux Kernel HCI Interface, braucht root
+- Eigene Test-App — minimaler HCI Client für Connection+GATT
+
+**Schritte:**
+- ⬚ TCP Server Skeleton (non-blocking, in main loop integriert)
+- ⬚ RADIO TX Capture: Paket aus PACKETPTR lesen wenn END event
+- ⬚ BLE ADV PDU Parsing (ADV_IND, SCAN_REQ, SCAN_RSP)
+- ⬚ HCI Event Generation (LE Advertising Report)
+- ⬚ HCI Command Handling (Reset, LE Set Scan, LE Create Connection)
+- ⬚ Connection State: CONNECT_IND → Data Channel PDUs → HCI ACL
+- ⬚ RADIO RX Injection: HCI ACL → LL PDU → PACKETPTR schreiben, RADIO Events feuern
+- ⬚ Integration Test mit Bumble (Scan → Connect → GATT Read)
 
 ### Bestandsaufnahme (was steht, was nicht)
 | Komponente | Status | Produktiv-tauglich? |

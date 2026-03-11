@@ -15,6 +15,7 @@ class GPIO : public Device {
     uint32_t in_ = 0;            // Input values (simulated externally)
     uint32_t dir_ = 0;           // Direction (1=output)
     uint32_t latch_ = 0;         // Latch (detect state)
+    uint32_t detect_ = 0;        // Per-pin DETECT state (SENSE match)
     std::array<uint32_t, 32> pin_cnf_{}; // Per-pin config
 
     // Callbacks
@@ -26,7 +27,22 @@ class GPIO : public Device {
         out_ = new_out;
     }
 
+    // Recompute DETECT for all pins, fire PORT on rising edge
+    uint32_t compute_detect() const {
+        uint32_t det = 0;
+        uint32_t levels = (in_ & ~dir_) | (out_ & dir_);
+        for (int i = 0; i < 32; i++) {
+            uint8_t sense = (pin_cnf_[i] >> 16) & 3;
+            bool level = levels & (1u << i);
+            if ((sense == 2 && level) || (sense == 3 && !level))
+                det |= (1u << i);
+        }
+        return det;
+    }
+
+    inline void update_detect();
     inline void notify_gpiote();
+    inline void notify_gpiote_detect(uint32_t rising_detect);
 
 public:
     void set_on_out_change(std::function<void(uint32_t, uint32_t)> cb) { on_out_change_ = cb; }
@@ -37,10 +53,7 @@ public:
         if (pin >= 32) return;
         if (high) in_ |= (1u << pin);
         else in_ &= ~(1u << pin);
-        // Update LATCH: set bit when SENSE condition matches
-        uint8_t sense = (pin_cnf_[pin] >> 16) & 3;
-        if ((sense == 2 && high) || (sense == 3 && !high))
-            latch_ |= (1u << pin);
+        update_detect();
         notify_gpiote();
     }
 
@@ -70,18 +83,19 @@ public:
         if (addr >= 0x700 && addr < 0x780) {
             uint8_t pin = (addr - 0x700) / 4;
             uint32_t val = pin_cnf_[pin];
-            // Emulate nrfx_gpiote SENSE toggle: when ISR reads PIN_CNF and
-            // SENSE matches current pin state, auto-toggle SENSE for next edge.
-            // The firmware binary's nrfx_gpiote should do this but doesn't.
+            // Auto-toggle SENSE when read in ISR and condition matches.
+            // nrfx_gpiote should toggle SENSE itself but some binaries don't.
+            // Safe for firmware that does toggle: its subsequent write overrides.
             uint8_t sense = (val >> 16) & 3;
             if (sense >= 2) {
                 bool pin_high = get_pin(pin);
                 if ((sense == 2 && pin_high) || (sense == 3 && !pin_high)) {
                     uint8_t new_sense = (sense == 2) ? 3 : 2;
                     pin_cnf_[pin] = (val & ~0x00030000u) | ((uint32_t)new_sense << 16);
+                    update_detect();
                 }
             }
-            return val;  // Return ORIGINAL value to firmware
+            return val;
         }
         return 0;
     }
@@ -99,6 +113,8 @@ public:
         default:
             if (addr >= 0x700 && addr < 0x780) {
                 pin_cnf_[(addr - 0x700) / 4] = val;
+                // SENSE change can cause DETECT edge
+                update_detect();
             }
             break;
         }
@@ -132,7 +148,7 @@ public:
     uint32_t get_ev_port() const { return ev_port_; }
     void set_nvic(NVIC* nvic, uint32_t irq) { nvic_ = nvic; irq_ = irq; }
 
-    // Called when any GPIO input pin changes (from GPIO::set_pin or output changes)
+    // Called when any GPIO pin level changes (for GPIOTE IN channels)
     void pin_changed(uint32_t new_state) {
         uint32_t old = pin_state_;
         pin_state_ = new_state;
@@ -154,9 +170,12 @@ public:
                 fire_irq();
             }
         }
+    }
 
-        // PORT event: fire on any input change
-        if (rising | falling) {
+    // Called when DETECT signal has rising edges (SENSE condition newly matched)
+    // PORT event fires on rising edge of global DETECT, not on pin level change
+    void detect_rising(uint32_t rising_detect) {
+        if (rising_detect) {
             ev_port_ = 1;
             fire_irq();
         }
@@ -188,6 +207,18 @@ public:
         if (addr == 0x308) { inten_ &= ~val; return; }
     }
 };
+
+inline void GPIO::update_detect() {
+    uint32_t new_detect = compute_detect();
+    uint32_t rising = new_detect & ~detect_;
+    if (rising) {
+        latch_ |= rising;
+        detect_ = new_detect;
+        if (gpiote_) gpiote_->detect_rising(rising);
+    } else {
+        detect_ = new_detect;
+    }
+}
 
 inline void GPIO::notify_gpiote() {
     if (gpiote_) {

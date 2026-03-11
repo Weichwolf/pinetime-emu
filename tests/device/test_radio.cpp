@@ -13,14 +13,14 @@ void test_txen_ready() {
     Radio radio;
     radio.write(0x000, Width::Word, 1); // TXEN
     ASSERT_EQ(radio.read(0x100, Width::Word), 1u); // READY event
-    ASSERT_EQ(radio.read(0x550, Width::Word), 11u); // TXIDLE state
+    ASSERT_EQ(radio.read(0x550, Width::Word), 10u); // TXIDLE state
 }
 
 void test_rxen_ready() {
     Radio radio;
     radio.write(0x004, Width::Word, 1); // RXEN
     ASSERT_EQ(radio.read(0x100, Width::Word), 1u); // READY event
-    ASSERT_EQ(radio.read(0x550, Width::Word), 3u); // RXIDLE
+    ASSERT_EQ(radio.read(0x550, Width::Word), 2u); // RXIDLE
 }
 
 void test_tx_complete() {
@@ -145,10 +145,37 @@ void test_txpower() {
 void test_rx_no_data() {
     Radio radio;
     radio.write(0x004, Width::Word, 1); // RXEN
-    ASSERT_EQ(radio.read(0x550, Width::Word), 3u); // RXIDLE
+    ASSERT_EQ(radio.read(0x550, Width::Word), 2u); // RXIDLE
     radio.write(0x008, Width::Word, 1); // START
     // RX should not produce payload events (stub)
     ASSERT_EQ(radio.read(0x108, Width::Word), 0u); // No PAYLOAD
+}
+
+void test_shorts_disabled_txen() {
+    Radio radio;
+    // READY_START + END_DISABLE + DISABLED_TXEN
+    radio.write(0x200, Width::Word, (1u<<0) | (1u<<1) | (1u<<2));
+    radio.write(0x000, Width::Word, 1); // TXEN → READY → START → END → DISABLE → TXEN
+    // After chain: should be back in TXIDLE (auto-TXEN after DISABLE)
+    ASSERT_EQ(radio.read(0x550, Width::Word), 10u); // TXIDLE
+}
+
+void test_shorts_disabled_rxen() {
+    Radio radio;
+    // READY_START + END_DISABLE + DISABLED_RXEN
+    radio.write(0x200, Width::Word, (1u<<0) | (1u<<1) | (1u<<3));
+    radio.write(0x000, Width::Word, 1); // TXEN → READY → START → END → DISABLE → RXEN → READY → START → RX
+    // After chain with READY_START: should be in RX (listening)
+    ASSERT_EQ(radio.read(0x550, Width::Word), 3u); // RX
+}
+
+void test_stop() {
+    Radio radio;
+    radio.write(0x004, Width::Word, 1); // RXEN
+    radio.write(0x008, Width::Word, 1); // START → RX
+    radio.write(0x00C, Width::Word, 1); // STOP
+    ASSERT_EQ(radio.read(0x110, Width::Word), 1u); // DISABLED
+    ASSERT_EQ(radio.read(0x550, Width::Word), 0u); // Disabled
 }
 
 int main() {
@@ -170,5 +197,8 @@ int main() {
     RUN(test_pcnf_registers);
     RUN(test_txpower);
     RUN(test_rx_no_data);
+    RUN(test_shorts_disabled_txen);
+    RUN(test_shorts_disabled_rxen);
+    RUN(test_stop);
     TEST_REPORT();
 }
