@@ -3,7 +3,7 @@ OBJCOPY = arm-none-eabi-objcopy
 CFLAGS = -mcpu=cortex-m4 -mthumb -mfloat-abi=hard -mfpu=fpv4-sp-d16 -nostdlib -ffreestanding
 LDFLAGS = -T test.ld -nostdlib
 
-TESTS = test_basic test_alu test_thumb32 test_mem test_vfp test_it test_exceptions test_peripherals
+TESTS = test_basic test_alu test_thumb32 test_mem test_vfp test_it test_exceptions test_peripherals test_fpu_exceptions test_faults
 
 all: $(addsuffix .bin, $(TESTS))
 

@@ -31,10 +31,22 @@ class NVIC : public Device {
     uint32_t shcsr_ = 0;
     uint32_t icsr_ = 0;
     uint32_t cpacr_ = 0;   // Coprocessor Access Control
+    uint32_t cfsr_ = 0;    // Configurable Fault Status (MMFSR+BFSR+UFSR)
+    uint32_t hfsr_ = 0;    // HardFault Status
+    uint32_t dfsr_ = 0;    // Debug Fault Status
+    uint32_t mmfar_ = 0;   // MemManage Fault Address
+    uint32_t bfar_ = 0;    // BusFault Address
     uint32_t fpccr_ = 0xC0000000;  // FP Context Control (ASPEN=1, LSPEN=1)
     uint32_t fpcar_ = 0;           // FP Context Address
     uint32_t fpdscr_ = 0;          // FP Default Status Control
     const uint32_t* cpu_pc_ = nullptr;
+
+    // MPU (stub — accepts config, no enforcement)
+    uint32_t mpu_type_ = 0x00000800; // 8 regions, unified
+    uint32_t mpu_ctrl_ = 0;
+    uint32_t mpu_rnr_ = 0;          // Region Number
+    std::array<uint32_t, 8> mpu_rbar_{};  // Region Base Address
+    std::array<uint32_t, 8> mpu_rasr_{};  // Region Attribute and Size
 
     // SysTick
     uint32_t syst_csr_ = 0;    // Control and Status
@@ -143,6 +155,41 @@ public:
     void clear_sys_pending(uint32_t exc) { if (exc >= 2 && exc <= 15) sys_pending_ &= ~(1u << exc); }
     bool is_sys_pending(uint32_t exc) const { return exc >= 2 && exc <= 15 && (sys_pending_ & (1u << exc)); }
 
+    // Fault helpers — returns exception number to take (4=MemManage, 5=BusFault, 6=UsageFault, 3=HardFault)
+    uint32_t raise_usage_fault(uint16_t ufsr_bits) {
+        cfsr_ |= (uint32_t)ufsr_bits << 16;
+        if (shcsr_ & (1u << 18)) { // USGFAULTENA
+            set_sys_pending(6);
+            return 6;
+        }
+        hfsr_ |= (1u << 30); // FORCED — escalated to HardFault
+        return 3;
+    }
+
+    uint32_t raise_bus_fault(uint8_t bfsr_bits, uint32_t addr) {
+        cfsr_ |= (uint32_t)bfsr_bits << 8;
+        bfar_ = addr;
+        if (bfsr_bits & 0x80) cfsr_ |= (1u << 15); // BFARVALID
+        if (shcsr_ & (1u << 17)) { // BUSFAULTENA
+            set_sys_pending(5);
+            return 5;
+        }
+        hfsr_ |= (1u << 30);
+        return 3;
+    }
+
+    uint32_t raise_mem_fault(uint8_t mmfsr_bits, uint32_t addr) {
+        cfsr_ |= mmfsr_bits;
+        mmfar_ = addr;
+        if (mmfsr_bits & 0x80) cfsr_ |= (1u << 7); // MMARVALID
+        if (shcsr_ & (1u << 16)) { // MEMFAULTENA
+            set_sys_pending(4);
+            return 4;
+        }
+        hfsr_ |= (1u << 30);
+        return 3;
+    }
+
     bool systick_enabled() const { return syst_csr_ & 1; }
     bool systick_irq_enabled() const { return syst_csr_ & 2; }
     bool systick_uses_cpu_clock() const { return syst_csr_ & 4; }
@@ -153,8 +200,8 @@ public:
         if (addr >= 0x010 && addr <= 0x01C) return read_systick(addr - 0x010);
         // NVIC: 0x100-0x4FF
         if (addr >= 0x100 && addr < 0x500) return read_nvic(addr - 0x100);
-        // SCB: 0xD00-0xD8C (includes CPACR at 0xD88)
-        if (addr >= 0xD00 && addr < 0xD90) return read_scb(addr - 0xD00);
+        // SCB + MPU: 0xD00-0xDA4 (includes CPACR at 0xD88, MPU at 0xD90-0xDA4)
+        if (addr >= 0xD00 && addr <= 0xDA4) return read_scb(addr - 0xD00);
         // FP extension: 0xF34-0xF3C
         if (addr >= 0xF34 && addr <= 0xF3C) return read_scb(addr - 0xD00);
         // STIR: 0xF00
@@ -165,7 +212,7 @@ public:
     void write(uint32_t addr, Width /*w*/, uint32_t val) override {
         if (addr >= 0x010 && addr <= 0x01C) { write_systick(addr - 0x010, val); return; }
         if (addr >= 0x100 && addr < 0x500) { write_nvic(addr - 0x100, val); return; }
-        if (addr >= 0xD00 && addr < 0xD90) { write_scb(addr - 0xD00, val); return; }
+        if (addr >= 0xD00 && addr <= 0xDA4) { write_scb(addr - 0xD00, val); return; }
         if (addr >= 0xF34 && addr <= 0xF3C) { write_scb(addr - 0xD00, val); return; }
         if (addr == 0xF00) { set_pending(val & 0xFF); return; } // STIR
     }
@@ -252,13 +299,26 @@ private:
         case 0x1C: return shpr_[4] | (shpr_[5]<<8) | (shpr_[6]<<16) | (shpr_[7]<<24);
         case 0x20: return shpr_[8] | (shpr_[9]<<8) | (shpr_[10]<<16) | (shpr_[11]<<24);
         case 0x24: return shcsr_;
-        case 0x28: return 0; // CFSR
-        case 0x2C: return 0; // HFSR
-        case 0x30: return 0; // DFSR
-        case 0x34: return 0; // MMFAR
-        case 0x38: return 0; // BFAR
-        case 0x3C: return 0; // AFSR
+        case 0x28: return cfsr_;   // CFSR (MMFSR[7:0] | BFSR[15:8] | UFSR[31:16])
+        case 0x2C: return hfsr_;   // HFSR
+        case 0x30: return dfsr_;   // DFSR
+        case 0x34: return mmfar_;  // MMFAR
+        case 0x38: return bfar_;   // BFAR
+        case 0x3C: return 0;       // AFSR
         case 0x88: return cpacr_;
+        // MPU registers (0xD90-0xDA4 → offset 0x90-0xA4)
+        case 0x90: return mpu_type_;     // MPU_TYPE
+        case 0x94: return mpu_ctrl_;     // MPU_CTRL
+        case 0x98: return mpu_rnr_;      // MPU_RNR
+        case 0x9C: {                     // MPU_RBAR
+            uint8_t region = mpu_rnr_ & 7;
+            return mpu_rbar_[region];
+        }
+        case 0xA0: {                     // MPU_RASR
+            uint8_t region = mpu_rnr_ & 7;
+            return mpu_rasr_[region];
+        }
+        case 0xA4: return mpu_rbar_[(mpu_rnr_ + 1) & 7]; // MPU_RBAR_A1 (alias)
         // FP extension registers (at 0xF34, 0xF38, 0xF3C offset from E000ED00)
         case 0x34 + 0x200: return fpccr_;
         case 0x38 + 0x200: return fpcar_;
@@ -305,7 +365,26 @@ private:
             shpr_[8] = val; shpr_[9] = val>>8; shpr_[10] = val>>16; shpr_[11] = val>>24;
             break;
         case 0x24: shcsr_ = val; break;
+        case 0x28: cfsr_ &= ~val; break;   // CFSR: W1C
+        case 0x2C: hfsr_ &= ~val; break;   // HFSR: W1C
+        case 0x30: dfsr_ &= ~val; break;   // DFSR: W1C
+        case 0x34: mmfar_ = val; break;
+        case 0x38: bfar_ = val; break;
         case 0x88: cpacr_ = val; break;
+        // MPU registers
+        case 0x94: mpu_ctrl_ = val & 7; break;  // MPU_CTRL (ENABLE, HFNMIENA, PRIVDEFENA)
+        case 0x98: mpu_rnr_ = val & 7; break;   // MPU_RNR
+        case 0x9C: {                              // MPU_RBAR
+            uint8_t region = (val & 0x10) ? (val & 7) : (mpu_rnr_ & 7); // VALID bit selects region
+            if (val & 0x10) mpu_rnr_ = val & 7;
+            mpu_rbar_[region] = val & 0xFFFFFFE0; // Base addr (bits 31:5)
+            break;
+        }
+        case 0xA0: {                              // MPU_RASR
+            uint8_t region = mpu_rnr_ & 7;
+            mpu_rasr_[region] = val;
+            break;
+        }
         case 0x34 + 0x200: fpccr_ = val; break;
         case 0x38 + 0x200: fpcar_ = val; break;
         case 0x3C + 0x200: fpdscr_ = val; break;
