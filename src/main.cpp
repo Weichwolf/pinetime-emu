@@ -218,6 +218,7 @@ struct EmulatorContext {
 
         bus.set_fast_path(flash.data(), FLASH_SIZE,
                           sram.data(), SRAM_BASE, SRAM_SIZE);
+        cpu.set_flash(flash.data(), FLASH_SIZE);
 
         // Wire CPU to NVIC and DWT
         cpu.set_nvic(&nvic);
@@ -228,6 +229,10 @@ struct EmulatorContext {
         bus.cpu_cy_ = &cpu.cycles;
         bus.watch_addr_ = 0;  // No watchpoint
         dwt.set_cpu(&cpu);
+        flash.set_on_write([this](uint32_t addr, uint32_t len) {
+            cpu.invalidate_cache(addr, len);
+        });
+        nvmc.set_cpu(&cpu);
 
         // Wire peripherals to NVIC (nRF52 IRQ numbers)
         clock_power.set_nvic(&nvic, 0);

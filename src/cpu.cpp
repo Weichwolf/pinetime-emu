@@ -384,20 +384,68 @@ uint16_t hw1 = bus_->read16(r[15]);
     cycles++;
 }
 
+// Classify instruction for decode cache
+CPU::OpClass CPU::classify(uint16_t hw1, uint16_t hw2) const {
+    bool is32 = (hw1 >> 11) >= 0x1D;
+    if (!is32) return OpClass::THUMB16;
+    uint8_t op1 = (hw1 >> 11) & 3;
+    uint8_t op2 = (hw1 >> 4) & 0x7F;
+    switch (op1) {
+    case 1:
+        if ((op2 & 0x64) == 0x00) return OpClass::T32_LDST_MULT;
+        if ((op2 & 0x64) == 0x04) return OpClass::T32_LDST_DUAL;
+        if (!(op2 & 0x40)) return OpClass::T32_DP_SHIFT_REG;
+        if ((hw1 & 0x0F00) == 0x0E00)
+            return (hw2 & 0x10) ? OpClass::T32_VFP : OpClass::T32_VFP_DP;
+        return OpClass::T32_VFP_LDST;
+    case 2:
+        if (hw2 & 0x8000) {
+            // Branch vs misc control
+            uint8_t bop = (hw2 >> 12) & 7;
+            if ((bop & 5) == 0 && (hw1 & 0x0380) == 0x0380)
+                return OpClass::T32_MISC_CTRL;
+            return OpClass::T32_BRANCH;
+        }
+        if (hw1 & 0x0200) return OpClass::T32_DP_PLAIN_IMM;
+        return OpClass::T32_DP_MOD_IMM;
+    case 3:
+        if ((op2 & 0x60) == 0x00) return OpClass::T32_LDST_SINGLE;
+        if ((op2 & 0x70) == 0x20) return OpClass::T32_DP_REG;
+        if ((op2 & 0x78) == 0x30) return OpClass::T32_MULTIPLY;
+        if ((op2 & 0x78) == 0x38) return OpClass::T32_LONG_MULTIPLY;
+        if (op2 & 0x40) return OpClass::T32_VFP;
+        break;
+    }
+    return OpClass::THUMB16; // Fallback: let exec_thumb32 handle it
+}
+
+inline void CPU::exec_dispatch(OpClass op, uint16_t hw1, uint16_t hw2) {
+    switch (op) {
+    case OpClass::T32_LDST_MULT:     exec_thumb32_ldst_multiple(hw1, hw2); break;
+    case OpClass::T32_LDST_DUAL:     exec_thumb32_ldst_dual(hw1, hw2); break;
+    case OpClass::T32_DP_SHIFT_REG:  exec_thumb32_dp_shifted_reg(hw1, hw2); break;
+    case OpClass::T32_DP_MOD_IMM:    exec_thumb32_dp_mod_imm(hw1, hw2); break;
+    case OpClass::T32_DP_PLAIN_IMM:  exec_thumb32_dp_plain_imm(hw1, hw2); break;
+    case OpClass::T32_BRANCH:        exec_thumb32_branch(hw1, hw2); break;
+    case OpClass::T32_MISC_CTRL:     exec_thumb32_misc_control(hw1, hw2); break;
+    case OpClass::T32_LDST_SINGLE:   exec_thumb32_ldst_single(hw1, hw2); break;
+    case OpClass::T32_DP_REG:        exec_thumb32_dp_register(hw1, hw2); break;
+    case OpClass::T32_MULTIPLY:      exec_thumb32_multiply(hw1, hw2); break;
+    case OpClass::T32_LONG_MULTIPLY: exec_thumb32_long_multiply(hw1, hw2); break;
+    case OpClass::T32_VFP:           exec_vfp(hw1, hw2); break;
+    case OpClass::T32_VFP_LDST:      exec_vfp_ldst(hw1, hw2); break;
+    case OpClass::T32_VFP_DP:        exec_vfp_dp((hw1 << 16) | hw2); break;
+    default:                         exec_thumb32(hw1, hw2); break;
+    }
+}
+
 void CPU::run(uint64_t target_cycles) {
+    // Outer loop: handles interrupts, sysreset, breakpoints
     while (cycles < target_cycles && !halted) {
-        if (nvic_ && nvic_->check_sysreset()) {
-            fprintf(stderr, "[CPU] SYSRESETREQ at PC=0x%08X SP=0x%08X LR=0x%08X cy=%llu\n",
-                    r[15], r[13], r[14], (unsigned long long)cycles);
-            memset(r.data(), 0, sizeof(r));
-            xpsr = (1u << 24);
-            primask = basepri = faultmask = control = 0;
-            wfi = false;
-            branch_taken_ = false;
-            msp = bus_->read32(0) & ~3u;
-            r[13] = msp;
-            psp = 0;
-            r[15] = bus_->read32(4) & ~1u;
+        if (__builtin_expect(nvic_ && nvic_->check_sysreset(), 0)) {
+            fprintf(stderr, "[CPU] SYSRESETREQ at PC=0x%08X cy=%llu\n",
+                    r[15], (unsigned long long)cycles);
+            reset();
             continue;
         }
         if (irq_pending || wfi) {
@@ -405,23 +453,90 @@ void CPU::run(uint64_t target_cycles) {
             irq_pending = false;
             if (wfi) { cycles++; continue; }
         }
-        step();
-        if (num_breakpoints > 0) {
-            for (int i = 0; i < num_breakpoints; i++) {
-                if (r[15] == breakpoints[i]) {
-                    fprintf(stderr, "[BP] PC=0x%08X cy=%.2fM SP=0x%08X LR=0x%08X\n",
-                            r[15], cycles / 1e6, r[13], r[14]);
-                    breakpoint_hit = true;
-                    return;
+
+        // Inner loop: block-chained execution in flash
+        if (__builtin_expect(flash_ != nullptr && decode_cache_ != nullptr, 1)) {
+            while (cycles < target_cycles && !halted && !irq_pending && !wfi) {
+                uint32_t pc = r[15];
+                if (__builtin_expect(pc + 3 >= flash_size_, 0)) { step(); break; }
+
+                // Block execution: run sequential non-branching instructions
+                // without rechecking loop conditions
+                for (;;) {
+                    pc = r[15];
+                    if (__builtin_expect(pc + 3 >= flash_size_, 0)) break;
+
+                    uint16_t hw1 = *(const uint16_t*)(flash_ + pc);
+                    branch_taken_ = false;
+
+                    // IT block: rare, break to outer loop after one instruction
+                    if (__builtin_expect((xpsr & 0x0600FC00u) != 0, 0)) {
+                        bool was_in_it = in_it_block();
+                        if (was_in_it && !condition_passed(it_cond())) {
+                            r[15] += ((hw1 >> 11) >= 0x1D) ? 4 : 2;
+                            advance_it();
+                            cycles++;
+                            break;
+                        }
+                        uint32_t idx = pc >> 1;
+                        OpClass op = decode_cache_[idx];
+                        if (__builtin_expect(op == OpClass::UNCACHED, 0)) {
+                            uint16_t hw2 = *(const uint16_t*)(flash_ + pc + 2);
+                            op = classify(hw1, hw2);
+                            decode_cache_[idx] = op;
+                        }
+                        auto base = (OpClass)((uint8_t)op & ~OP_MAY_BRANCH);
+                        if (base == OpClass::THUMB16) {
+                            exec_thumb16(hw1);
+                            if (!branch_taken_) r[15] += 2;
+                        } else {
+                            uint16_t hw2 = *(const uint16_t*)(flash_ + pc + 2);
+                            exec_dispatch(op, hw1, hw2);
+                            if (!branch_taken_) r[15] += 4;
+                        }
+                        if (was_in_it) advance_it();
+                        cycles++;
+                        break;
+                    }
+
+                    // Hot path: no IT block
+                    uint32_t idx = pc >> 1;
+                    OpClass op = decode_cache_[idx];
+                    if (__builtin_expect(op == OpClass::UNCACHED, 0)) {
+                        uint16_t hw2 = *(const uint16_t*)(flash_ + pc + 2);
+                        op = classify(hw1, hw2);
+                        decode_cache_[idx] = op;
+                    }
+
+                    auto base = (OpClass)((uint8_t)op & ~OP_MAY_BRANCH);
+                    if (base == OpClass::THUMB16) {
+                        exec_thumb16(hw1);
+                        if (!branch_taken_) r[15] += 2;
+                    } else {
+                        uint16_t hw2 = *(const uint16_t*)(flash_ + pc + 2);
+                        exec_dispatch(op, hw1, hw2);
+                        if (!branch_taken_) r[15] += 4;
+                    }
+                    cycles++;
+
+                    // Block boundary: break at branches/WFI/halt/irq or every 64 instructions
+                    if (branch_taken_ || wfi || halted || irq_pending) break;
+                    if ((uint8_t)op & OP_MAY_BRANCH) break;
+                    if (__builtin_expect((cycles & 63) == 0, 0)) break;
+                }
+
+                if (__builtin_expect(num_breakpoints > 0, 0)) {
+                    for (int i = 0; i < num_breakpoints; i++) {
+                        if (r[15] == breakpoints[i]) {
+                            breakpoint_hit = true;
+                            return;
+                        }
+                    }
                 }
             }
+        } else {
+            step();
         }
-        // Detect InfiniTime → MCUBoot transition (including via address 0)
-        if (prev_pc_ >= 0x8000 && r[15] < 0x8000) {
-            fprintf(stderr, "[TRANSITION] prev=0x%08X new=0x%08X LR=0x%08X SP=0x%08X cy=%.2fM xpsr=0x%08X\n",
-                    prev_pc_, r[15], r[14], r[13], cycles / 1e6, xpsr);
-        }
-        prev_pc_ = r[15];
     }
 }
 

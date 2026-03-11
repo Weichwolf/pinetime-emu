@@ -1,5 +1,6 @@
 #pragma once
 #include "../bus.hpp"
+#include "../cpu.hpp"
 #include "memory.hpp"
 #include <cstdio>
 
@@ -11,9 +12,11 @@ class NVMC : public Device {
     uint32_t config_ = 0;     // 0=ReadOnly, 1=Write, 2=Erase
     uint32_t icachecnf_ = 0;
     Flash* flash_ = nullptr;
+    CPU* cpu_ = nullptr;
 
 public:
     void set_flash(Flash* f) { flash_ = f; }
+    void set_cpu(CPU* c) { cpu_ = c; }
     const uint32_t* config_ptr() const { return &config_; }
 
     // Is flash writable?
@@ -39,17 +42,19 @@ public:
             config_ = val & 3; break;
         case 0x508: // ERASEPAGE
             if (erase_enabled() && flash_) {
-                // Erase 4KB page
                 uint32_t page_addr = val & ~0xFFFu;
-                // fprintf(stderr, "[NVMC] ERASEPAGE 0x%05X\n", page_addr);
                 uint8_t* data = flash_->data();
-                if (page_addr + 0x1000 <= flash_->size())
+                if (page_addr + 0x1000 <= flash_->size()) {
                     memset(data + page_addr, 0xFF, 0x1000);
+                    if (cpu_) cpu_->invalidate_cache(page_addr, 0x1000);
+                }
             }
             break;
         case 0x50C: // ERASEALL
-            if (erase_enabled() && flash_ && val)
+            if (erase_enabled() && flash_ && val) {
                 memset(flash_->data(), 0xFF, flash_->size());
+                if (cpu_) cpu_->invalidate_cache(0, flash_->size());
+            }
             break;
         case 0x510: break; // ERASEUICR
         case 0x540: icachecnf_ = val; break;

@@ -58,9 +58,45 @@ public:
         if (num_breakpoints < MAX_BP) breakpoints[num_breakpoints++] = addr;
     }
 
+    // Decode cache: classifies each halfword in flash for single-level dispatch
+    // Bit 7: set if instruction may branch (B, BL, BX, BLX, POP w/ PC, LDR PC, etc.)
+    static constexpr uint8_t OP_MAY_BRANCH = 0x80;
+    enum class OpClass : uint8_t {
+        UNCACHED = 0,
+        THUMB16           = 1,
+        THUMB16_BRANCH    = 1 | OP_MAY_BRANCH,
+        T32_LDST_MULT     = 2,
+        T32_LDST_DUAL     = 3,
+        T32_DP_SHIFT_REG  = 4,
+        T32_DP_MOD_IMM    = 5,
+        T32_DP_PLAIN_IMM  = 6,
+        T32_BRANCH        = 7 | OP_MAY_BRANCH,
+        T32_LDST_SINGLE   = 8,
+        T32_DP_REG        = 9,
+        T32_MULTIPLY      = 10,
+        T32_LONG_MULTIPLY = 11,
+        T32_VFP           = 12,
+        T32_VFP_LDST      = 13,
+        T32_VFP_DP        = 14,
+        T32_MISC_CTRL     = 15 | OP_MAY_BRANCH,
+    };
+
     explicit CPU(Bus* bus) : bus_(bus) {}
 
     void set_nvic(NVIC* nvic) { nvic_ = nvic; }
+    void set_flash(const uint8_t* flash, uint32_t size) {
+        flash_ = flash; flash_size_ = size;
+        // Allocate decode cache (one byte per halfword)
+        delete[] decode_cache_;
+        decode_cache_ = new OpClass[size / 2]();
+    }
+    void invalidate_cache(uint32_t addr, uint32_t len) {
+        if (!decode_cache_) return;
+        uint32_t start = (addr >> 1);
+        uint32_t end = ((addr + len + 1) >> 1);
+        if (end > flash_size_ / 2) end = flash_size_ / 2;
+        for (uint32_t i = start; i < end; i++) decode_cache_[i] = OpClass::UNCACHED;
+    }
     void reset();
     void step();
     void run(uint64_t target_cycles);
@@ -124,10 +160,20 @@ public:
             set_it_state((s & 0xE0) | ((s << 1) & 0x1F));
     }
 
+    ~CPU() { delete[] decode_cache_; }
+
 private:
     Bus* bus_;
     NVIC* nvic_ = nullptr;
     bool branch_taken_ = false;
+
+    // Direct flash access for fast instruction fetch
+    const uint8_t* flash_ = nullptr;
+    uint32_t flash_size_ = 0;
+    OpClass* decode_cache_ = nullptr;
+
+    OpClass classify(uint16_t hw1, uint16_t hw2) const;
+    void exec_dispatch(OpClass op, uint16_t hw1, uint16_t hw2);
 
     uint8_t it_state() const {
         return ((xpsr >> 8) & 0xFC) | ((xpsr >> 25) & 0x03);
