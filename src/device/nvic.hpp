@@ -237,6 +237,12 @@ public:
         return {};
     }
 
+    uint64_t next_event(uint64_t now) const override {
+        if (!(syst_csr_ & 1)) return UINT64_MAX;
+        // SysTick fires when CVR reaches 0
+        return now + (syst_cvr_ ? syst_cvr_ : syst_rvr_);
+    }
+
 private:
     uint32_t read_systick(uint32_t off) const {
         switch (off) {

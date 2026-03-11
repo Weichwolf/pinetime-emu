@@ -70,6 +70,11 @@ public:
         }
         return {};
     }
+
+    uint64_t next_event(uint64_t now) const override {
+        if (!running_) return UINT64_MAX;
+        return now + delay_ + 1;
+    }
 };
 
 } // namespace pt
