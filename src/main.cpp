@@ -13,6 +13,7 @@
 #include "device/i2c_devices.hpp"
 #include "device/rng.hpp"
 #include "device/ecb.hpp"
+#include "device/uarte.hpp"
 #include "device/radio.hpp"
 #include "device/ppi.hpp"
 #include "device/saadc.hpp"
@@ -132,6 +133,7 @@ struct EmulatorContext {
     pt::TEMP temp;
     pt::RNG rng;
     pt::ECB ecb;
+    pt::UARTE uarte0;
     StubDevice fpu_stub;
     StubDevice ccm_stub;
     pt::EGU egu0, egu1, egu2, egu3, egu4, egu5;
@@ -162,6 +164,7 @@ struct EmulatorContext {
         // nRF52 peripherals
         bus.map(0x40000000, 0x1000, &clock_power); // CLOCK + POWER
         bus.map(0x40001000, 0x1000, &radio);        // RADIO
+        bus.map(0x40002000, 0x1000, &uarte0);      // UARTE0
         bus.map(0x40003000, 0x1000, &spim0);       // SPI0/TWI0 — used as SPI for LCD
         bus.map(0x40004000, 0x1000, &twim1);       // SPI1/TWI1 — used as TWI for sensors
         bus.map(0x40006000, 0x1000, &gpiote);      // GPIOTE
@@ -173,6 +176,13 @@ struct EmulatorContext {
         bus.map(0x4000C000, 0x1000, &temp);         // TEMP
         bus.map(0x4000D000, 0x1000, &rng);         // RNG
         radio.set_nvic(&nvic, 1);
+        uarte0.set_bus(&bus);
+        uarte0.set_nvic(&nvic, 2);  // UARTE0 = IRQ 2
+        uarte0.set_tx_callback([](const char* data, size_t len) {
+            fprintf(stderr, "[UART] ");
+            fwrite(data, 1, len, stderr);
+            if (len > 0 && data[len-1] != '\n') fprintf(stderr, "\n");
+        });
         ppi.set_bus(&bus);
         saadc.set_bus(&bus);
         saadc.set_nvic(&nvic, 7);
@@ -182,6 +192,7 @@ struct EmulatorContext {
         ecb.set_bus(&bus);
         bus.map(0x4000F000, 0x1000, &ccm_stub);    // CCM/AAR
         bus.map(0x40010000, 0x1000, &wdt);         // WDT
+        wdt.set_nvic(&nvic, 16);                    // WDT = IRQ 16
         bus.map(0x40011000, 0x1000, &rtc1);        // RTC1
         bus.map(0x4001E000, 0x1000, &nvmc);        // NVMC
         bus.map(0x40014000, 0x1000, &egu0);    // SWI0/EGU0
@@ -284,7 +295,7 @@ struct EmulatorContext {
     }
 
     // All tickable peripherals
-    static constexpr int NUM_TICKABLE = 10;
+    static constexpr int NUM_TICKABLE = 12;
     pt::Device* tickable_[NUM_TICKABLE];
     int num_tickable_ = 0;
 
@@ -299,6 +310,7 @@ struct EmulatorContext {
         tickable_[num_tickable_++] = &rng;
         tickable_[num_tickable_++] = &temp;
         tickable_[num_tickable_++] = &ppi;
+        tickable_[num_tickable_++] = &wdt;
     }
 
     void tick_peripherals() {

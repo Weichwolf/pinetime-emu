@@ -139,7 +139,10 @@ private:
             it->second->i2c_write(buf, len);
             txd_amount_ = len;
         } else {
-            txd_amount_ = txd_maxcnt_;
+            // No device at address → ANACK (address NACK)
+            errorsrc_ |= 2; // Bit 1 = ANACK
+            ev_error_ = 1;
+            txd_amount_ = 0;
         }
 
         ev_lasttx_ = 1;
@@ -170,13 +173,15 @@ private:
 
         if (it != devices_.end()) {
             it->second->i2c_read(buf, len);
+            for (uint32_t i = 0; i < len; i++)
+                bus_->write8(rxd_ptr_ + i, buf[i]);
+            rxd_amount_ = len;
         } else {
-            memset(buf, 0xFF, len);
+            // No device at address → ANACK
+            errorsrc_ |= 2;
+            ev_error_ = 1;
+            rxd_amount_ = 0;
         }
-
-        for (uint32_t i = 0; i < len; i++)
-            bus_->write8(rxd_ptr_ + i, buf[i]);
-        rxd_amount_ = len;
 
         ev_lastrx_ = 1;
 

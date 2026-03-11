@@ -88,7 +88,7 @@ public:
 
     void i2c_read(uint8_t* data, uint32_t len) override {
         read_count_++;
-        if (cycles_) update_ppg();
+        if (cycles_ && (regs_[0x01] & 0x80)) update_ppg();
         for (uint32_t i = 0; i < len; i++)
             data[i] = regs_[(uint8_t)(reg_ptr_ + i)];
     }
@@ -106,16 +106,18 @@ private:
         constexpr double bpm = 72.0;
         double phase = 2.0 * M_PI * (bpm / 60.0) * t;
 
-        // PPG waveform: sharp systolic peak + slower diastolic decay
-        double systolic = exp(-0.5 * pow(fmod(phase, 2*M_PI) - 1.0, 2) / 0.15);
-        double diastolic = 0.3 * exp(-0.5 * pow(fmod(phase, 2*M_PI) - 2.0, 2) / 0.3);
+        // PPG waveform: systolic peak + diastolic bump
+        // Wider peaks (σ²=0.5) for reliable detection at 10 Hz sampling
+        double p = fmod(phase, 2*M_PI);
+        double systolic = exp(-0.5 * (p - 1.2) * (p - 1.2) / 0.5);
+        double diastolic = 0.35 * exp(-0.5 * (p - 2.5) * (p - 2.5) / 0.6);
         double ppg_ac = systolic + diastolic;
 
-        // Noise: deterministic from cycle count, ~2% amplitude
+        // Noise: deterministic from cycle count, ~3% amplitude
         uint32_t n = noise(*cycles_ / 640000); // changes every ~10ms
-        double jitter = ((int32_t)(n & 0xFFF) - 2048) / 2048.0; // [-1, 1]
+        double jitter = ((int32_t)(n & 0xFFF) - 2048) / 2048.0;
 
-        double ppg = 30000.0 + 10000.0 * ppg_ac + 600.0 * jitter;
+        double ppg = 20000.0 + 15000.0 * ppg_ac + 800.0 * jitter;
         uint32_t v = (uint32_t)std::max(0.0, std::min(ppg, 262143.0));
 
         // Encode for InfiniTime's ReadHrs():
