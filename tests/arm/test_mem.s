@@ -167,6 +167,57 @@ _start:
     cmp r2, r3
     bne fail15
 
+    @ Test 16: STRH with register offset
+    ldr r0, =0x200000A0
+    movs r1, #4
+    movw r2, #0xABCD
+    strh r2, [r0, r1]       @ store at offset 4
+    ldrh r3, [r0, r1]
+    cmp r3, r2
+    bne fail16
+
+    @ Test 17: LDRSB with register offset
+    ldr r0, =0x200000B0
+    movs r1, #0xFE          @ -2 as signed byte
+    strb r1, [r0]
+    movs r2, #0
+    ldrsb r3, [r0, r2]
+    ldr r4, =0xFFFFFFFE
+    cmp r3, r4
+    bne fail17
+
+    @ Test 18: LDRSH with register offset
+    ldr r0, =0x200000C0
+    movw r1, #0xFFFE        @ -2 as signed halfword
+    strh r1, [r0]
+    movs r2, #0
+    ldrsh r3, [r0, r2]
+    ldr r4, =0xFFFFFFFE
+    cmp r3, r4
+    bne fail18
+
+    @ Test 19: LDR.W pre-indexed with writeback
+    ldr r0, =0x200000D0
+    ldr r1, =0xDEADC0DE
+    str r1, [r0, #8]        @ store at D0+8 = D8
+    ldr.w r2, [r0, #8]!     @ pre-indexed: addr = r0+8, then r0 = r0+8
+    cmp r2, r1
+    bne fail19
+    ldr r3, =0x200000D8
+    cmp r0, r3               @ r0 should be updated
+    bne fail19
+
+    @ Test 20: STR.W/LDR.W with post-indexed
+    ldr r0, =0x200000E0
+    ldr r1, =0x12345678
+    str r1, [r0]             @ store at E0
+    ldr.w r2, [r0], #4       @ post-indexed: load from r0, then r0 += 4
+    cmp r2, r1
+    bne fail20
+    ldr r3, =0x200000E4
+    cmp r0, r3               @ r0 should be incremented
+    bne fail20
+
     @ All tests passed
     movs r0, #0
     bkpt #0
@@ -200,6 +251,16 @@ fail13: movs r0, #13
 fail14: movs r0, #14
     bkpt #0
 fail15: movs r0, #15
+    bkpt #0
+fail16: movs r0, #16
+    bkpt #0
+fail17: movs r0, #17
+    bkpt #0
+fail18: movs r0, #18
+    bkpt #0
+fail19: movs r0, #19
+    bkpt #0
+fail20: movs r0, #20
     bkpt #0
 
     .pool

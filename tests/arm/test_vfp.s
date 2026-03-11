@@ -147,6 +147,121 @@ _start:
     vmrs APSR_nzcv, FPSCR
     bne fail15
 
+    @ Test 16: VCVT unsigned int→float
+    ldr r0, =200
+    vmov s0, r0
+    vcvt.f32.u32 s1, s0
+    vmov r1, s1
+    ldr r2, =0x43480000       @ 200.0
+    cmp r1, r2
+    bne fail16
+
+    @ Test 17: VCVT float→unsigned int
+    vmov.f32 s0, #10.0
+    vcvt.u32.f32 s1, s0
+    vmov r0, s1
+    cmp r0, #10
+    bne fail17
+
+    @ Test 18: VMLA.F32 (multiply-accumulate: Sd += Sn * Sm)
+    vmov.f32 s0, #2.0         @ accumulator
+    vmov.f32 s1, #3.0
+    vmov.f32 s2, #4.0
+    vmla.f32 s0, s1, s2       @ s0 = 2.0 + 3.0*4.0 = 14.0
+    vmov r0, s0
+    ldr r1, =0x41600000       @ 14.0
+    cmp r0, r1
+    bne fail18
+
+    @ Test 19: VNMUL.F32 (negated multiply)
+    vmov.f32 s0, #3.0
+    vmov.f32 s1, #5.0
+    vnmul.f32 s2, s0, s1      @ s2 = -(3.0*5.0) = -15.0
+    vmov r0, s2
+    ldr r1, =0xC1700000       @ -15.0
+    cmp r0, r1
+    bne fail19
+
+    @ Test 20: VCMP less-than
+    vmov.f32 s0, #1.0
+    vmov.f32 s1, #2.0
+    vcmp.f32 s0, s1
+    vmrs APSR_nzcv, FPSCR
+    bge fail20                 @ 1.0 < 2.0, should be LT
+
+    @ Test 21: VLDM/VSTM (load/store multiple FP regs)
+    ldr r0, =0x20000200
+    vmov.f32 s8, #1.0
+    vmov.f32 s9, #2.0
+    vmov.f32 s10, #3.0
+    vstm r0, {s8-s10}
+    @ Clear and reload
+    vsub.f32 s8, s8, s8
+    vsub.f32 s9, s9, s9
+    vsub.f32 s10, s10, s10
+    vldm r0, {s8-s10}
+    @ Verify
+    vmov r1, s8
+    ldr r2, =0x3F800000       @ 1.0
+    cmp r1, r2
+    bne fail21
+    vmov r1, s10
+    ldr r2, =0x40400000       @ 3.0
+    cmp r1, r2
+    bne fail21
+
+    @ Test 22: VMOV from two core regs to consecutive S regs
+    movs r0, #0
+    movs r1, #0
+    ldr r0, =0x3F800000       @ 1.0
+    ldr r1, =0x40000000       @ 2.0
+    vmov s20, r0
+    vmov s21, r1
+    vmov r2, s20
+    vmov r3, s21
+    cmp r2, r0
+    bne fail22
+    cmp r3, r1
+    bne fail22
+
+    @ Test 23: VCMP against zero
+    vsub.f32 s0, s0, s0   @ s0 = 0.0
+    vcmp.f32 s0, #0.0
+    vmrs APSR_nzcv, FPSCR
+    bne fail23
+
+    @ Test 24: VMLS.F32 (multiply-subtract: Sd -= Sn * Sm)
+    vmov.f32 s0, #10.0        @ accumulator
+    vmov.f32 s1, #2.0
+    vmov.f32 s2, #3.0
+    vmls.f32 s0, s1, s2       @ s0 = 10.0 - 2.0*3.0 = 4.0
+    vmov r0, s0
+    ldr r1, =0x40800000       @ 4.0
+    cmp r0, r1
+    bne fail24
+
+    @ Test 25: VSTM/VLDM with writeback
+    ldr r0, =0x20000300
+    vmov.f32 s12, #5.0
+    vmov.f32 s13, #6.0
+    vstmia r0!, {s12, s13}    @ store 2 floats, advance r0 by 8
+    ldr r1, =0x20000308
+    cmp r0, r1
+    bne fail25
+    @ Load back from base
+    ldr r0, =0x20000300
+    vsub.f32 s14, s14, s14
+    vsub.f32 s15, s15, s15
+    vldmia r0!, {s14, s15}
+    vmov r1, s14
+    ldr r2, =0x40A00000       @ 5.0
+    cmp r1, r2
+    bne fail25
+    vmov r1, s15
+    ldr r2, =0x40C00000       @ 6.0
+    cmp r1, r2
+    bne fail25
+
     @ All tests passed
     movs r0, #0
     bkpt #0
@@ -180,6 +295,26 @@ fail13: movs r0, #13
 fail14: movs r0, #14
     bkpt #0
 fail15: movs r0, #15
+    bkpt #0
+fail16: movs r0, #16
+    bkpt #0
+fail17: movs r0, #17
+    bkpt #0
+fail18: movs r0, #18
+    bkpt #0
+fail19: movs r0, #19
+    bkpt #0
+fail20: movs r0, #20
+    bkpt #0
+fail21: movs r0, #21
+    bkpt #0
+fail22: movs r0, #22
+    bkpt #0
+fail23: movs r0, #23
+    bkpt #0
+fail24: movs r0, #24
+    bkpt #0
+fail25: movs r0, #25
     bkpt #0
 
     .pool

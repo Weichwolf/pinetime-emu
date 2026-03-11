@@ -162,6 +162,34 @@ _start:
     cmp r0, #0x80
     bne fail20
 
+    @ Test 21: REVSH (signed byte-reverse halfword)
+    ldr r0, =0x000000FF   @ lower half = 0x00FF, reversed = 0xFF00, sign-extended
+    revsh r0, r0
+    ldr r1, =0xFFFFFF00
+    cmp r0, r1
+    bne fail21
+
+    @ Test 22: SUB sets N flag (negative result)
+    movs r0, #5
+    subs r0, #10          @ 5 - 10 = -5 → N=1
+    bpl fail22            @ should be negative
+
+    @ Test 23: ADD sets C flag (carry out)
+    ldr r0, =0xFFFFFFFF
+    adds r0, #1           @ overflow → C=1, Z=1
+    bcc fail23            @ carry should be set
+
+    @ Test 24: ADD sets V flag (signed overflow)
+    ldr r0, =0x7FFFFFFF   @ MAX_INT
+    adds r0, #1           @ overflow → V=1
+    bvc fail24            @ overflow should be set
+
+    @ Test 25: LSL sets C from shifted-out bit
+    movw r0, #0
+    movt r0, #0x8000     @ r0 = 0x80000000
+    lsls r0, r0, #1     @ shift left, MSB goes to C
+    bcc fail25           @ carry should be set
+
     @ All tests passed
     movs r0, #0
     bkpt #0
@@ -205,6 +233,16 @@ fail18: movs r0, #18
 fail19: movs r0, #19
     bkpt #0
 fail20: movs r0, #20
+    bkpt #0
+fail21: movs r0, #21
+    bkpt #0
+fail22: movs r0, #22
+    bkpt #0
+fail23: movs r0, #23
+    bkpt #0
+fail24: movs r0, #24
+    bkpt #0
+fail25: movs r0, #25
     bkpt #0
 
     .pool

@@ -85,10 +85,14 @@ test7_ok:
     @ Test 8: CBZ — don't branch if nonzero
     movs r0, #1
     movs r1, #0
-    cbz r0, fail8_tramp    @ should NOT branch (r0 != 0)
+    cbz r0, fail8_t        @ should NOT branch (r0 != 0)
     movs r1, #1
     cmp r1, #1
     bne fail8
+    b test9
+fail8_t:
+    b fail8
+test9:
 
     @ Test 9: CBNZ — branch if nonzero
     movs r0, #42
@@ -99,10 +103,14 @@ test9_ok:
     @ Test 10: CBNZ — don't branch if zero
     movs r0, #0
     movs r1, #0
-    cbnz r0, fail10_tramp  @ should NOT branch
+    cbnz r0, fail10_t      @ should NOT branch
     movs r1, #1
     cmp r1, #1
     bne fail10
+    b test11
+fail10_t:
+    b fail10
+test11:
 
     @ Test 11: IT with CMP inside
     movs r0, #3
@@ -152,14 +160,58 @@ test11_ok:
     cmp r3, #200
     bne fail15
 
+    @ Test 16: IT CS (carry set) after ADDS
+    ldr r0, =0xFFFFFFFF
+    adds r0, #1            @ C=1, Z=1
+    it cs
+    movcs r1, #77
+    cmp r1, #77
+    bne fail16
+
+    @ Test 17: IT CC (carry clear)
+    movs r0, #5
+    adds r0, #1            @ C=0
+    it cc
+    movcc r1, #88
+    cmp r1, #88
+    bne fail17
+
+    @ Test 18: IT MI (negative)
+    movs r0, #1
+    subs r0, #5            @ N=1 (result is negative)
+    it mi
+    movmi r1, #33
+    cmp r1, #33
+    bne fail18
+
+    @ Test 19: IT PL (positive or zero)
+    movs r0, #0
+    cmp r0, #0             @ Z=1, N=0
+    it pl
+    movpl r1, #44
+    cmp r1, #44
+    bne fail19
+
+    @ Test 20: ITET (then-else-then)
+    movs r0, #5
+    movs r1, #0
+    movs r2, #0
+    movs r3, #0
+    cmp r0, #5
+    itet eq
+    moveq r1, #1           @ then: execute
+    movne r2, #2           @ else: skip
+    moveq r3, #3           @ then: execute
+    cmp r1, #1
+    bne fail20
+    cmp r2, #0             @ should NOT have been modified
+    bne fail20
+    cmp r3, #3
+    bne fail20
+
     @ All tests passed
     movs r0, #0
     bkpt #0
-
-fail8_tramp:
-    b fail8
-fail10_tramp:
-    b fail10
 
 fail1:  movs r0, #1
     bkpt #0
@@ -190,6 +242,16 @@ fail13: movs r0, #13
 fail14: movs r0, #14
     bkpt #0
 fail15: movs r0, #15
+    bkpt #0
+fail16: movs r0, #16
+    bkpt #0
+fail17: movs r0, #17
+    bkpt #0
+fail18: movs r0, #18
+    bkpt #0
+fail19: movs r0, #19
+    bkpt #0
+fail20: movs r0, #20
     bkpt #0
 
     .pool

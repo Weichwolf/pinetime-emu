@@ -165,6 +165,58 @@ _start:
     cmp r2, r1
     bne fail15
 
+    @ ---- Test 16: NVIC priority register ----
+    ldr r0, =0xE000E400    @ NVIC_IPR0
+    movs r1, #0xC0         @ Priority 192 for IRQ0
+    str r1, [r0]
+    ldr r2, [r0]
+    and.w r2, r2, #0xFF
+    cmp r2, #0xC0
+    bne fail16
+
+    @ ---- Test 17: CLOCK LFCLK ----
+    ldr r0, =0x40000000    @ CLOCK base
+    movs r1, #1
+    str r1, [r0, #0x008]   @ TASKS_LFCLKSTART
+    ldr r2, [r0, #0x104]   @ EVENTS_LFCLKSTARTED
+    cmp r2, #1
+    bne fail17
+
+    @ ---- Test 18: TEMP sensor read ----
+    ldr r0, =0x4000C000    @ TEMP base
+    movs r1, #1
+    str r1, [r0]           @ TASKS_START
+    @ Read result (emulator returns instant result)
+    ldr r2, [r0, #0x508]   @ TEMP value
+    @ Should be reasonable temperature (emulator: 21°C = 84 in 0.25°C units)
+    cmp r2, #0
+    beq fail18             @ at least non-zero
+
+    @ ---- Test 19: RNG register access ----
+    ldr r0, =0x4000D000    @ RNG base
+    @ Write CONFIG (DERCEN bit)
+    movs r1, #1
+    str r1, [r0, #0x504]   @ CONFIG = DERCEN
+    ldr r2, [r0, #0x504]
+    cmp r2, #1
+    bne fail19
+    @ Write SHORTS
+    str r1, [r0, #0x200]   @ SHORTS = VALRDY_STOP
+    ldr r2, [r0, #0x200]
+    cmp r2, #1
+    bne fail19
+
+    @ ---- Test 20: POWER RESETREAS ----
+    ldr r0, =0x40000000    @ POWER base (shared with CLOCK)
+    ldr r2, [r0, #0x400]   @ RESETREAS
+    @ Should be readable (no fault)
+    @ Value could be anything, just verify access works
+    movs r1, #0
+    str r1, [r0, #0x400]   @ Clear RESETREAS
+    ldr r2, [r0, #0x400]
+    cmp r2, #0
+    bne fail20
+
     @ All tests passed
     movs r0, #0
     bkpt #0
@@ -198,6 +250,16 @@ fail13: movs r0, #13
 fail14: movs r0, #14
     bkpt #0
 fail15: movs r0, #15
+    bkpt #0
+fail16: movs r0, #16
+    bkpt #0
+fail17: movs r0, #17
+    bkpt #0
+fail18: movs r0, #18
+    bkpt #0
+fail19: movs r0, #19
+    bkpt #0
+fail20: movs r0, #20
     bkpt #0
 
     .pool

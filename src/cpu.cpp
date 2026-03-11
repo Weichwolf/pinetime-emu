@@ -1933,7 +1933,7 @@ void CPU::exec_vfp_dp(uint32_t inst) {
             result = (opc3 & 1) ? -(sf(vd) - a*b) : -(sf(vd) + a*b);
             sf(vd) = result; return;
         case 0x2: // VMUL/VNMUL
-            sf(vd) = (opc1 & 4) ? a*b : a*b; // bit 2 selects VMUL vs VNMUL
+            sf(vd) = (opc3 & 1) ? -(a*b) : a*b; // opc3[0] selects VNMUL vs VMUL
             return;
         case 0x3: // VADD/VSUB (opc3[0] selects SUB)
             sf(vd) = (opc3 & 1) ? a - b : a + b; return;

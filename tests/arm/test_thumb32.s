@@ -207,6 +207,97 @@ test12_back:
     cmp r2, #17
     bne fail25
 
+    @ Test 26: MSR/MRS round-trip (PRIMASK)
+    movs r0, #1
+    msr PRIMASK, r0
+    mrs r1, PRIMASK
+    cmp r1, #1
+    bne fail26
+    movs r0, #0
+    msr PRIMASK, r0        @ restore
+
+    @ Test 27: SBFX (signed bit field extract)
+    ldr r0, =0x0000FF00    @ bits [15:8] = 0xFF
+    sbfx r1, r0, #8, #8   @ extract 8 bits at lsb=8, sign-extend: -1
+    adds r1, #1
+    cmp r1, #0
+    bne fail27
+
+    @ Test 28: BFI (bit field insert)
+    ldr r0, =0x20000400
+    movs r1, #0
+    str r1, [r0]           @ target = 0
+    movs r2, #0xFF         @ source
+    ldr r1, [r0]           @ r1 = 0
+    bfi r1, r2, #8, #8    @ insert 0xFF at bits [15:8]
+    movw r3, #0xFF00
+    cmp r1, r3
+    bne fail28
+
+    @ Test 29: BFC (bit field clear)
+    ldr r0, =0xFFFFFFFF
+    bfc r0, #4, #8        @ clear bits [11:4]
+    ldr r1, =0xFFFFF00F
+    cmp r0, r1
+    bne fail29
+
+    @ Test 30: SUB.W with immediate
+    ldr r0, =0x1000
+    sub.w r1, r0, #0x100
+    movw r2, #0x0F00
+    cmp r1, r2
+    bne fail30
+
+    @ Test 31: ORN.W (OR NOT)
+    movs r0, #0x0F
+    movs r1, #0x0F
+    orn r2, r0, r1         @ r0 | ~r1 = 0x0F | 0xFFFFFFF0 = 0xFFFFFFFF
+    adds r2, #1
+    cmp r2, #0
+    bne fail31
+
+    @ Test 32: EOR.W with shifted register
+    movs r0, #0xFF
+    movs r1, #0xFF
+    eor.w r2, r0, r1, lsl #4  @ 0xFF ^ (0xFF << 4) = 0xFF ^ 0xFF0 = 0xF0F
+    movw r3, #0x0F0F
+    cmp r2, r3
+    bne fail32
+
+    @ Test 33: ADDW (12-bit immediate)
+    ldr r0, =0x1000
+    addw r1, r0, #0xFFF    @ 0x1000 + 0xFFF = 0x1FFF
+    movw r2, #0x1FFF
+    cmp r1, r2
+    bne fail33
+
+    @ Test 34: SUBW (12-bit immediate)
+    ldr r0, =0x2000
+    subw r1, r0, #0xFFF    @ 0x2000 - 0xFFF = 0x1001
+    movw r2, #0x1001
+    cmp r1, r2
+    bne fail34
+
+    @ Test 35: STMDB/LDMDB (decrement before)
+    ldr r0, =0x20000500
+    add r0, #16            @ point to end of area
+    movs r1, #0x11
+    movs r2, #0x22
+    movs r3, #0x33
+    stmdb r0!, {r1, r2, r3}  @ store descending, writeback
+    @ r0 should be base - 12
+    ldr r4, =0x20000504
+    cmp r0, r4
+    bne fail35
+    @ Load them back
+    ldm r0, {r4, r5, r6}
+    cmp r4, #0x11
+    bne fail35
+    cmp r5, #0x22
+    bne fail35
+    cmp r6, #0x33
+    bne fail35
+
     @ All tests passed
     movs r0, #0
     bkpt #0
@@ -269,6 +360,26 @@ fail23: movs r0, #23
 fail24: movs r0, #24
     bkpt #0
 fail25: movs r0, #25
+    bkpt #0
+fail26: movs r0, #26
+    bkpt #0
+fail27: movs r0, #27
+    bkpt #0
+fail28: movs r0, #28
+    bkpt #0
+fail29: movs r0, #29
+    bkpt #0
+fail30: movs r0, #30
+    bkpt #0
+fail31: movs r0, #31
+    bkpt #0
+fail32: movs r0, #32
+    bkpt #0
+fail33: movs r0, #33
+    bkpt #0
+fail34: movs r0, #34
+    bkpt #0
+fail35: movs r0, #35
     bkpt #0
 
     .align 2
