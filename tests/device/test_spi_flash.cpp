@@ -139,6 +139,94 @@ void test_write_without_wren() {
     ASSERT_EQ(flash.data()[0], 0xFF); // Unchanged
 }
 
+void test_wrdi() {
+    SpiFlash flash(4096);
+    // WREN then WRDI
+    uint8_t wren[] = {0x06}; flash.transfer(wren, 1, nullptr, 0);
+    flash.reset_cmd();
+    uint8_t wrdi[] = {0x04}; flash.transfer(wrdi, 1, nullptr, 0);
+    flash.reset_cmd();
+    // Check status: WEL should be 0
+    uint8_t tx = 0x05; flash.transfer(&tx, 1, nullptr, 0);
+    uint8_t rx = 0xFF; flash.transfer(nullptr, 0, &rx, 1);
+    ASSERT_EQ(rx & 0x02, 0u);
+}
+
+void test_release_deep_powerdown() {
+    SpiFlash flash(4096);
+    uint8_t tx[] = {0xAB};
+    flash.transfer(tx, 1, nullptr, 0);
+    // Should not crash, just process command
+}
+
+void test_reset_cmd_clears_state() {
+    SpiFlash flash(4096);
+    // Start a READ command
+    uint8_t tx[] = {0x03, 0x00};
+    flash.transfer(tx, 2, nullptr, 0);
+    // CS deselect (reset_cmd)
+    flash.reset_cmd();
+    // Now JEDEC ID should work fresh
+    uint8_t id_tx[] = {0x9F, 0, 0, 0};
+    uint8_t rx[4]{};
+    flash.transfer(id_tx, 4, rx, 4);
+    ASSERT_EQ(rx[1], 0x0B);
+}
+
+void test_sequential_page_program() {
+    SpiFlash flash(4096);
+    // Write page 1
+    uint8_t w1[] = {0x06}; flash.transfer(w1, 1, nullptr, 0);
+    uint8_t p1[] = {0x02, 0, 0, 0, 0x11, 0x22};
+    flash.transfer(p1, 6, nullptr, 0);
+
+    // Write page 2 (new CS cycle)
+    flash.reset_cmd();
+    uint8_t w2[] = {0x06}; flash.transfer(w2, 1, nullptr, 0);
+    flash.reset_cmd();
+    uint8_t p2[] = {0x02, 0, 0, 0x10, 0x33, 0x44};
+    flash.transfer(p2, 6, nullptr, 0);
+
+    ASSERT_EQ(flash.read(0x00, Width::Byte), 0x11);
+    ASSERT_EQ(flash.read(0x01, Width::Byte), 0x22);
+    ASSERT_EQ(flash.read(0x10, Width::Byte), 0x33);
+    ASSERT_EQ(flash.read(0x11, Width::Byte), 0x44);
+}
+
+void test_block_erase_64k() {
+    SpiFlash flash(131072); // 128KB
+    // Write at start of 64KB block 1 (offset 0x10000)
+    flash.data()[0x10000] = 0x42;
+    flash.data()[0x1FFFF] = 0x43;
+    // And outside block 1
+    flash.data()[0x0FFFF] = 0xAA; // End of block 0
+
+    uint8_t wren[] = {0x06}; flash.transfer(wren, 1, nullptr, 0);
+    // 0xD8, addr = 0x01, 0x00, 0x00 → addr = 0x010000
+    uint8_t tx[] = {0xD8, 0x01, 0x00, 0x00};
+    flash.transfer(tx, 4, nullptr, 0);
+
+    ASSERT_EQ(flash.data()[0x10000], 0xFF); // Erased
+    ASSERT_EQ(flash.data()[0x1FFFF], 0xFF); // Erased
+    ASSERT_EQ(flash.data()[0x0FFFF], 0xAA); // Untouched
+}
+
+void test_split_tx_rx_read() {
+    SpiFlash flash(4096);
+    flash.data()[0x100] = 0xEE;
+    flash.data()[0x101] = 0xFF;
+
+    // First transfer: TX only (cmd + addr)
+    uint8_t tx[] = {0x03, 0x00, 0x01, 0x00}; // READ at 0x100
+    flash.transfer(tx, 4, nullptr, 0);
+
+    // Second transfer: RX only (data phase)
+    uint8_t rx[2]{};
+    flash.transfer(nullptr, 0, rx, 2);
+    ASSERT_EQ(rx[0], 0xEE);
+    ASSERT_EQ(rx[1], 0xFF);
+}
+
 int main() {
     RUN(test_initial_ff);
     RUN(test_jedec_id);
@@ -152,5 +240,11 @@ int main() {
     RUN(test_fast_read);
     RUN(test_device_interface);
     RUN(test_write_without_wren);
+    RUN(test_wrdi);
+    RUN(test_release_deep_powerdown);
+    RUN(test_reset_cmd_clears_state);
+    RUN(test_sequential_page_program);
+    RUN(test_block_erase_64k);
+    RUN(test_split_tx_rx_read);
     TEST_REPORT();
 }

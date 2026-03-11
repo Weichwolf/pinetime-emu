@@ -47,6 +47,21 @@ void test_rren_config() {
     ASSERT_EQ(wdt.read(0x50C, Width::Word), 0x09u);
 }
 
+void test_reload_any_value_accepted() {
+    WDT wdt;
+    // Emulator accepts any write to RR[] (no key check)
+    wdt.write(0x600, Width::Word, 0xDEADBEEF);
+    ASSERT(wdt.read(0x404, Width::Word) & 1); // REQSTATUS set
+}
+
+void test_all_reload_channels() {
+    WDT wdt;
+    for (int i = 0; i < 8; i++) {
+        wdt.write(0x600 + i*4, Width::Word, 0x6E524635);
+        ASSERT(wdt.read(0x404, Width::Word) & (1u << i));
+    }
+}
+
 int main() {
     RUN(test_initial_state);
     RUN(test_start);
@@ -54,5 +69,7 @@ int main() {
     RUN(test_reload_request);
     RUN(test_inten);
     RUN(test_rren_config);
+    RUN(test_reload_any_value_accepted);
+    RUN(test_all_reload_channels);
     TEST_REPORT();
 }

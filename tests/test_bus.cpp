@@ -63,11 +63,67 @@ void test_sram_little_endian() {
     ASSERT_EQ(sram[3], 0x04);
 }
 
+void test_multi_device_mapping() {
+    Bus bus;
+    DummyDevice dev1, dev2;
+    dev1.read_val = 0xAA;
+    dev2.read_val = 0xBB;
+    bus.map(0x40001000, 0x1000, &dev1);
+    bus.map(0x40002000, 0x1000, &dev2);
+    ASSERT_EQ(bus.read32(0x40001000), 0xAA);
+    ASSERT_EQ(bus.read32(0x40002000), 0xBB);
+}
+
+void test_width_byte_half_word() {
+    Bus bus;
+    uint8_t sram[16]{};
+    bus.set_fast_path(nullptr, 0, sram, 0x20000000, sizeof(sram));
+    bus.write32(0x20000000, 0xDDCCBBAA);
+    ASSERT_EQ(bus.read8(0x20000000), 0xAA);
+    ASSERT_EQ(bus.read8(0x20000001), 0xBB);
+    ASSERT_EQ(bus.read16(0x20000000), 0xBBAA);
+    ASSERT_EQ(bus.read16(0x20000002), 0xDDCC);
+    ASSERT_EQ(bus.read32(0x20000000), 0xDDCCBBAA);
+}
+
+void test_sram_write_byte_preserves() {
+    Bus bus;
+    uint8_t sram[16]{};
+    bus.set_fast_path(nullptr, 0, sram, 0x20000000, sizeof(sram));
+    bus.write32(0x20000000, 0x12345678);
+    bus.write8(0x20000001, 0xFF);
+    ASSERT_EQ(bus.read32(0x20000000), 0x1234FF78u);
+}
+
+void test_sram_write_half_preserves() {
+    Bus bus;
+    uint8_t sram[16]{};
+    bus.set_fast_path(nullptr, 0, sram, 0x20000000, sizeof(sram));
+    bus.write32(0x20000000, 0x12345678);
+    bus.write16(0x20000002, 0xABCD);
+    ASSERT_EQ(bus.read32(0x20000000), 0xABCD5678u);
+}
+
+void test_device_offset_calculation() {
+    Bus bus;
+    DummyDevice dev;
+    bus.map(0x40008000, 0x1000, &dev);
+    bus.read32(0x40008540);
+    ASSERT_EQ(dev.last_read_addr, 0x540u);
+    bus.write32(0x40008200, 0x42);
+    ASSERT_EQ(dev.last_write_addr, 0x200u);
+}
+
 int main() {
     RUN(test_fast_path_sram);
     RUN(test_fast_path_flash);
     RUN(test_device_mapping);
     RUN(test_unmapped_returns_zero);
     RUN(test_sram_little_endian);
+    RUN(test_multi_device_mapping);
+    RUN(test_width_byte_half_word);
+    RUN(test_sram_write_byte_preserves);
+    RUN(test_sram_write_half_preserves);
+    RUN(test_device_offset_calculation);
     TEST_REPORT();
 }

@@ -65,6 +65,38 @@ void test_config_ptr() {
     ASSERT_EQ(*nvmc.config_ptr(), 1u);
 }
 
+void test_erase_without_config() {
+    NVMC nvmc;
+    Flash flash(4096);
+    uint32_t cfg = 1;
+    flash.set_nvmc_config(&cfg);
+    flash.write(0, Width::Word, 0);
+
+    nvmc.set_flash(&flash);
+    nvmc.write(0x504, Width::Word, 0); // ReadOnly mode
+    nvmc.write(0x508, Width::Word, 0); // Try ERASEPAGE
+    // Should NOT erase (not in erase mode)
+    ASSERT_EQ(flash.read(0, Width::Word), 0u);
+}
+
+void test_config_transitions() {
+    NVMC nvmc;
+    // ReadOnly -> Write -> Erase -> ReadOnly
+    nvmc.write(0x504, Width::Word, 0);
+    ASSERT(!nvmc.write_enabled());
+    ASSERT(!nvmc.erase_enabled());
+
+    nvmc.write(0x504, Width::Word, 1);
+    ASSERT(nvmc.write_enabled());
+
+    nvmc.write(0x504, Width::Word, 2);
+    ASSERT(nvmc.erase_enabled());
+
+    nvmc.write(0x504, Width::Word, 0);
+    ASSERT(!nvmc.write_enabled());
+    ASSERT(!nvmc.erase_enabled());
+}
+
 int main() {
     RUN(test_always_ready);
     RUN(test_config);
@@ -72,5 +104,7 @@ int main() {
     RUN(test_erase_all);
     RUN(test_icachecnf);
     RUN(test_config_ptr);
+    RUN(test_erase_without_config);
+    RUN(test_config_transitions);
     TEST_REPORT();
 }

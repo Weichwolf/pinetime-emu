@@ -148,6 +148,57 @@ void test_transfer_count() {
     ASSERT_EQ(spim.transfer_count(), 1u);
 }
 
+void test_zero_length_transfer() {
+    RAM ram(256);
+    Bus bus;
+    bus.set_fast_path(nullptr, 0, ram.data(), 0x20000000, ram.size());
+    SPIM spim;
+    spim.set_bus(&bus);
+
+    bool called = false;
+    spim.set_callback([&](const uint8_t*, uint32_t tx_len, uint8_t*, uint32_t rx_len) {
+        called = true;
+        ASSERT_EQ(tx_len, 0u);
+        ASSERT_EQ(rx_len, 0u);
+    });
+
+    spim.write(0x500, Width::Word, 7);
+    spim.write(0x544, Width::Word, 0x20000000);
+    spim.write(0x548, Width::Word, 0); // TX len=0
+    spim.write(0x534, Width::Word, 0x20000010);
+    spim.write(0x538, Width::Word, 0); // RX len=0
+    spim.write(0x010, Width::Word, 1);
+
+    ASSERT(called);
+    ASSERT_EQ(spim.read(0x118, Width::Word), 1u); // END
+}
+
+void test_event_clear() {
+    SPIM spim;
+    RAM ram(256);
+    Bus bus;
+    bus.set_fast_path(nullptr, 0, ram.data(), 0x20000000, ram.size());
+    spim.set_bus(&bus);
+    spim.set_callback([](const uint8_t*, uint32_t, uint8_t*, uint32_t) {});
+
+    spim.write(0x500, Width::Word, 7);
+    spim.write(0x544, Width::Word, 0x20000000);
+    spim.write(0x548, Width::Word, 1);
+    spim.write(0x534, Width::Word, 0x20000010);
+    spim.write(0x538, Width::Word, 0);
+    spim.write(0x010, Width::Word, 1);
+
+    ASSERT_EQ(spim.read(0x118, Width::Word), 1u);
+    spim.write(0x118, Width::Word, 0);
+    ASSERT_EQ(spim.read(0x118, Width::Word), 0u);
+}
+
+void test_frequency() {
+    SPIM spim;
+    spim.write(0x524, Width::Word, 0x80000000); // 8 Mbps
+    ASSERT_EQ(spim.read(0x524, Width::Word), 0x80000000u);
+}
+
 int main() {
     RUN(test_initial_state);
     RUN(test_pin_config);
@@ -158,5 +209,8 @@ int main() {
     RUN(test_legacy_spi);
     RUN(test_inten);
     RUN(test_transfer_count);
+    RUN(test_zero_length_transfer);
+    RUN(test_event_clear);
+    RUN(test_frequency);
     TEST_REPORT();
 }

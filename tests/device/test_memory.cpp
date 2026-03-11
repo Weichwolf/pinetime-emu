@@ -69,6 +69,49 @@ void test_flash_size() {
     ASSERT_EQ(flash.size(), 512u * 1024);
 }
 
+void test_ram_zero_init() {
+    RAM ram(64);
+    for (uint32_t i = 0; i < 64; i += 4)
+        ASSERT_EQ(ram.read(i, Width::Word), 0u);
+}
+
+void test_ram_half_word_alignment() {
+    RAM ram(16);
+    ram.write(2, Width::Half, 0xABCD);
+    ASSERT_EQ(ram.read(2, Width::Half), 0xABCD);
+    // Byte access within same half-word
+    ASSERT_EQ(ram.read(2, Width::Byte), 0xCD);
+    ASSERT_EQ(ram.read(3, Width::Byte), 0xAB);
+}
+
+void test_flash_byte_write() {
+    Flash flash(256);
+    uint32_t config = 1;
+    flash.set_nvmc_config(&config);
+    flash.write(0, Width::Byte, 0x42);
+    ASSERT_EQ(flash.read(0, Width::Byte), 0x42);
+    // Adjacent bytes unchanged
+    ASSERT_EQ(flash.read(1, Width::Byte), 0xFF);
+}
+
+void test_flash_half_write() {
+    Flash flash(256);
+    uint32_t config = 1;
+    flash.set_nvmc_config(&config);
+    flash.write(0, Width::Half, 0x1234);
+    ASSERT_EQ(flash.read(0, Width::Half), 0x1234);
+}
+
+void test_ram_large_load() {
+    RAM ram(1024);
+    uint8_t data[256];
+    for (int i = 0; i < 256; i++) data[i] = i;
+    ram.load(data, sizeof(data), 0);
+    ASSERT_EQ(ram.read(0, Width::Byte), 0x00);
+    ASSERT_EQ(ram.read(255, Width::Byte), 0xFF);
+    ASSERT_EQ(ram.read(0, Width::Word), 0x03020100u);
+}
+
 int main() {
     RUN(test_ram_read_write);
     RUN(test_ram_little_endian);
@@ -79,5 +122,10 @@ int main() {
     RUN(test_flash_write_enabled);
     RUN(test_flash_and_semantics);
     RUN(test_flash_size);
+    RUN(test_ram_zero_init);
+    RUN(test_ram_half_word_alignment);
+    RUN(test_flash_byte_write);
+    RUN(test_flash_half_write);
+    RUN(test_ram_large_load);
     TEST_REPORT();
 }

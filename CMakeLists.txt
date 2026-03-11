@@ -43,3 +43,38 @@ add_executable(test_cpu tests/test_cpu.cpp src/cpu.cpp)
 target_include_directories(test_cpu PRIVATE src)
 target_compile_options(test_cpu PRIVATE -Wall -Wextra -O2)
 add_test(NAME test_cpu COMMAND test_cpu)
+
+# Integration test (end-to-end peripheral pipelines)
+add_executable(test_integration tests/test_integration.cpp)
+target_include_directories(test_integration PRIVATE src)
+target_compile_options(test_integration PRIVATE -Wall -Wextra -O2)
+add_test(NAME test_integration COMMAND test_integration)
+
+# ARM assembly tests (cross-compiled, run in emulator)
+find_program(ARM_GCC arm-none-eabi-gcc)
+if(ARM_GCC)
+    set(ARM_TESTS test_basic test_alu test_thumb32 test_mem test_vfp test_it test_exceptions test_peripherals)
+    set(ARM_TEST_DIR ${CMAKE_SOURCE_DIR}/tests/arm)
+    set(ARM_BUILD_DIR ${CMAKE_BINARY_DIR}/arm_tests)
+    file(MAKE_DIRECTORY ${ARM_BUILD_DIR})
+
+    find_program(ARM_OBJCOPY arm-none-eabi-objcopy REQUIRED)
+    set(ARM_CFLAGS -mcpu=cortex-m4 -mthumb -mfloat-abi=hard -mfpu=fpv4-sp-d16 -nostdlib -ffreestanding)
+    set(ARM_LDFLAGS -T ${ARM_TEST_DIR}/test.ld -nostdlib)
+
+    foreach(name ${ARM_TESTS})
+        add_custom_command(
+            OUTPUT ${ARM_BUILD_DIR}/${name}.bin
+            COMMAND ${ARM_GCC} ${ARM_CFLAGS} -c ${ARM_TEST_DIR}/${name}.s -o ${ARM_BUILD_DIR}/${name}.o
+            COMMAND ${ARM_GCC} ${ARM_CFLAGS} ${ARM_LDFLAGS} ${ARM_BUILD_DIR}/${name}.o -o ${ARM_BUILD_DIR}/${name}.elf
+            COMMAND ${ARM_OBJCOPY} -O binary ${ARM_BUILD_DIR}/${name}.elf ${ARM_BUILD_DIR}/${name}.bin
+            DEPENDS ${ARM_TEST_DIR}/${name}.s ${ARM_TEST_DIR}/test.ld
+            COMMENT "Building ARM test: ${name}"
+        )
+        add_custom_target(arm_${name} ALL DEPENDS ${ARM_BUILD_DIR}/${name}.bin)
+        add_test(NAME arm_${name} COMMAND pinetime-emu --headless --timeout 5000 ${ARM_BUILD_DIR}/${name}.bin)
+        set_tests_properties(arm_${name} PROPERTIES DEPENDS pinetime-emu)
+    endforeach()
+else()
+    message(WARNING "arm-none-eabi-gcc not found — ARM assembly tests will be skipped")
+endif()

@@ -126,6 +126,136 @@ void test_gpiote_inten() {
     ASSERT_EQ(gpiote.read(0x300, Width::Word), 0xF0u);
 }
 
+void test_sense_toggle_cycle() {
+    // Critical InfiniTime path: SENSE toggles High->Low->High for successive gestures
+    GPIO gpio;
+    // Pin 0: SENSE=High (2)
+    gpio.write(0x700, Width::Word, 0x00020000);
+
+    // First touch: pin goes high -> SENSE matches
+    gpio.set_pin(0, true);
+    ASSERT(gpio.read(0x520, Width::Word) & 1); // LATCH set
+
+    // ISR reads PIN_CNF[0] -> toggles SENSE to Low (3)
+    gpio.read(0x700, Width::Word);
+    ASSERT_EQ((gpio.pin_cnf(0) >> 16) & 3, 3u); // Now SENSE=Low
+
+    // Release: pin goes low -> SENSE=Low matches
+    gpio.set_pin(0, false);
+    ASSERT(gpio.read(0x520, Width::Word) & 1); // LATCH set again
+
+    // ISR reads PIN_CNF[0] -> toggles SENSE back to High (2)
+    gpio.write(0x520, Width::Word, 1); // Clear latch
+    gpio.read(0x700, Width::Word);
+    ASSERT_EQ((gpio.pin_cnf(0) >> 16) & 3, 2u); // Back to SENSE=High
+
+    // Second touch: works again
+    gpio.set_pin(0, true);
+    ASSERT(gpio.read(0x520, Width::Word) & 1);
+}
+
+void test_gpiote_hitolo() {
+    GPIO gpio;
+    GPIOTE gpiote;
+    NVIC nvic;
+    bool irq_pending = false;
+    nvic.set_irq_pending_flag(&irq_pending);
+
+    gpio.set_gpiote(&gpiote);
+    gpiote.set_gpio(&gpio);
+    gpiote.set_nvic(&nvic, 6);
+
+    // Config channel 1: Event mode, pin 3, HiToLo (polarity=2)
+    gpiote.write(0x514, Width::Word, (3 << 8) | (2 << 16) | 1);
+    gpiote.write(0x304, Width::Word, 1u << 1); // Enable IN[1]
+
+    gpio.set_pin(3, true);
+    ASSERT_EQ(gpiote.read(0x104, Width::Word), 0u); // No event on rising
+
+    gpio.set_pin(3, false); // Falling edge
+    ASSERT_EQ(gpiote.read(0x104, Width::Word), 1u); // IN[1] event
+    ASSERT(nvic.is_pending(6));
+}
+
+void test_gpiote_toggle_polarity() {
+    GPIO gpio;
+    GPIOTE gpiote;
+    gpio.set_gpiote(&gpiote);
+    gpiote.set_gpio(&gpio);
+
+    // Channel 0: pin 7, Toggle (polarity=3)
+    gpiote.write(0x510, Width::Word, (7 << 8) | (3 << 16) | 1);
+
+    gpio.set_pin(7, true); // Rising
+    ASSERT_EQ(gpiote.read(0x100, Width::Word), 1u);
+    gpiote.write(0x100, Width::Word, 0); // Clear
+
+    gpio.set_pin(7, false); // Falling
+    ASSERT_EQ(gpiote.read(0x100, Width::Word), 1u); // Also triggers
+}
+
+void test_gpiote_multi_channel() {
+    GPIO gpio;
+    GPIOTE gpiote;
+    NVIC nvic;
+    bool irq_pending = false;
+    nvic.set_irq_pending_flag(&irq_pending);
+
+    gpio.set_gpiote(&gpiote);
+    gpiote.set_gpio(&gpio);
+    gpiote.set_nvic(&nvic, 6);
+
+    // Channel 0: pin 5, LoToHi
+    gpiote.write(0x510, Width::Word, (5 << 8) | (1 << 16) | 1);
+    // Channel 2: pin 10, LoToHi
+    gpiote.write(0x518, Width::Word, (10 << 8) | (1 << 16) | 1);
+    gpiote.write(0x304, Width::Word, (1u << 0) | (1u << 2)); // Enable IN[0] and IN[2]
+
+    gpio.set_pin(5, true);
+    ASSERT_EQ(gpiote.read(0x100, Width::Word), 1u); // IN[0]
+    ASSERT_EQ(gpiote.read(0x108, Width::Word), 0u); // IN[2] not yet
+
+    gpio.set_pin(10, true);
+    ASSERT_EQ(gpiote.read(0x108, Width::Word), 1u); // IN[2]
+}
+
+void test_gpio_out_callback() {
+    GPIO gpio;
+    uint32_t old_out = 0, new_out = 0;
+    int calls = 0;
+    gpio.set_on_out_change([&](uint32_t o, uint32_t n) {
+        old_out = o; new_out = n; calls++;
+    });
+    gpio.write(0x504, Width::Word, 0xFF);
+    ASSERT_EQ(calls, 1);
+    ASSERT_EQ(old_out, 0u);
+    ASSERT_EQ(new_out, 0xFFu);
+}
+
+void test_gpiote_event_clear() {
+    GPIO gpio;
+    GPIOTE gpiote;
+    gpio.set_gpiote(&gpiote);
+    gpiote.set_gpio(&gpio);
+
+    gpiote.write(0x510, Width::Word, (5 << 8) | (1 << 16) | 1);
+    gpio.set_pin(5, true);
+    ASSERT_EQ(gpiote.read(0x100, Width::Word), 1u);
+    gpiote.write(0x100, Width::Word, 0);
+    ASSERT_EQ(gpiote.read(0x100, Width::Word), 0u);
+}
+
+void test_latch_write_1_clear() {
+    GPIO gpio;
+    gpio.write(0x700 + 4*4, Width::Word, 0x00020000); // Pin 4 SENSE=High
+    gpio.set_pin(4, true);
+    ASSERT(gpio.read(0x520, Width::Word) & (1u << 4));
+    // Write 1 to clear bit 4
+    gpio.write(0x520, Width::Word, 1u << 4);
+    ASSERT(!(gpio.read(0x520, Width::Word) & (1u << 4)));
+    // Other bits unaffected
+}
+
 int main() {
     RUN(test_out_write_read);
     RUN(test_outset);
@@ -139,5 +269,12 @@ int main() {
     RUN(test_gpiote_event_mode);
     RUN(test_gpiote_port_event);
     RUN(test_gpiote_inten);
+    RUN(test_sense_toggle_cycle);
+    RUN(test_gpiote_hitolo);
+    RUN(test_gpiote_toggle_polarity);
+    RUN(test_gpiote_multi_channel);
+    RUN(test_gpio_out_callback);
+    RUN(test_gpiote_event_clear);
+    RUN(test_latch_write_1_clear);
     TEST_REPORT();
 }

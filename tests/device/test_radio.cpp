@@ -103,6 +103,54 @@ void test_inten() {
     ASSERT_EQ(radio.read(0x300, Width::Word), 0x10u);
 }
 
+void test_prefix_registers() {
+    Radio radio;
+    radio.write(0x524, Width::Word, 0x11223344); // PREFIX0
+    ASSERT_EQ(radio.read(0x524, Width::Word), 0x11223344u);
+    radio.write(0x528, Width::Word, 0x55667788); // PREFIX1
+    ASSERT_EQ(radio.read(0x528, Width::Word), 0x55667788u);
+}
+
+void test_base_registers() {
+    Radio radio;
+    radio.write(0x51C, Width::Word, 0xAABBCCDD); // BASE0
+    ASSERT_EQ(radio.read(0x51C, Width::Word), 0xAABBCCDDu);
+    radio.write(0x520, Width::Word, 0x11223344); // BASE1
+    ASSERT_EQ(radio.read(0x520, Width::Word), 0x11223344u);
+}
+
+void test_crc_registers() {
+    Radio radio;
+    radio.write(0x534, Width::Word, 0x30002); // CRCCNF
+    radio.write(0x538, Width::Word, 0x00065B); // CRCPOLY
+    radio.write(0x53C, Width::Word, 0x555555); // CRCINIT
+    ASSERT_EQ(radio.read(0x538, Width::Word), 0x00065Bu);
+    ASSERT_EQ(radio.read(0x53C, Width::Word), 0x555555u);
+}
+
+void test_pcnf_registers() {
+    Radio radio;
+    radio.write(0x514, Width::Word, 0x00040108); // PCNF0
+    ASSERT_EQ(radio.read(0x514, Width::Word), 0x00040108u);
+    radio.write(0x518, Width::Word, 0x040025FF); // PCNF1
+    ASSERT_EQ(radio.read(0x518, Width::Word), 0x040025FFu);
+}
+
+void test_txpower() {
+    Radio radio;
+    radio.write(0x50C, Width::Word, 4); // TXPOWER = +4 dBm
+    ASSERT_EQ(radio.read(0x50C, Width::Word), 4u);
+}
+
+void test_rx_no_data() {
+    Radio radio;
+    radio.write(0x004, Width::Word, 1); // RXEN
+    ASSERT_EQ(radio.read(0x550, Width::Word), 3u); // RXIDLE
+    radio.write(0x008, Width::Word, 1); // START
+    // RX should not produce payload events (stub)
+    ASSERT_EQ(radio.read(0x108, Width::Word), 0u); // No PAYLOAD
+}
+
 int main() {
     RUN(test_initial_state);
     RUN(test_txen_ready);
@@ -116,5 +164,11 @@ int main() {
     RUN(test_dab_dap);
     RUN(test_event_clear);
     RUN(test_inten);
+    RUN(test_prefix_registers);
+    RUN(test_base_registers);
+    RUN(test_crc_registers);
+    RUN(test_pcnf_registers);
+    RUN(test_txpower);
+    RUN(test_rx_no_data);
     TEST_REPORT();
 }

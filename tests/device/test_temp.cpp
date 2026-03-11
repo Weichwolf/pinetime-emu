@@ -59,6 +59,31 @@ void test_event_clear() {
     ASSERT_EQ(temp.read(0x100, Width::Word), 0u);
 }
 
+void test_temp_value_after_conversion() {
+    TEMP temp;
+    temp.write(0x000, Width::Word, 1);
+    for (uint64_t cy = 0; cy <= 40; cy++)
+        temp.tick(cy);
+    ASSERT_EQ(temp.read(0x100, Width::Word), 1u); // DATARDY
+    uint32_t val = temp.read(0x508, Width::Word);
+    ASSERT_EQ(val, 84u); // 21.0°C in 0.25°C units
+}
+
+void test_repeated_conversions() {
+    TEMP temp;
+    temp.write(0x000, Width::Word, 1);
+    for (uint64_t cy = 0; cy <= 40; cy++)
+        temp.tick(cy);
+    ASSERT_EQ(temp.read(0x100, Width::Word), 1u);
+
+    // Clear and do another
+    temp.write(0x100, Width::Word, 0);
+    temp.write(0x000, Width::Word, 1);
+    for (uint64_t cy = 41; cy <= 80; cy++)
+        temp.tick(cy);
+    ASSERT_EQ(temp.read(0x100, Width::Word), 1u);
+}
+
 int main() {
     RUN(test_initial_temp);
     RUN(test_start_conversion);
@@ -66,5 +91,7 @@ int main() {
     RUN(test_irq);
     RUN(test_inten);
     RUN(test_event_clear);
+    RUN(test_temp_value_after_conversion);
+    RUN(test_repeated_conversions);
     TEST_REPORT();
 }

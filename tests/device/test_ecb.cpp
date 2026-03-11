@@ -58,10 +58,56 @@ void test_no_bus_error() {
     ASSERT_EQ(ecb.read(0x104, Width::Word), 1u);
 }
 
+void test_aes_zero_key() {
+    RAM ram(1024);
+    Bus bus;
+    bus.set_fast_path(nullptr, 0, ram.data(), 0x20000000, ram.size());
+    ECB ecb;
+    ecb.set_bus(&bus);
+
+    // All-zero key, all-zero plaintext
+    // Expected: 0x66e94bd4ef8a2c3b884cfa59ca342b2e
+    uint8_t expected[] = {0x66,0xe9,0x4b,0xd4,0xef,0x8a,0x2c,0x3b,
+                          0x88,0x4c,0xfa,0x59,0xca,0x34,0x2b,0x2e};
+    uint32_t ptr = 0x100;
+    memset(ram.data() + ptr, 0, 48); // key=0, plain=0
+
+    ecb.write(0x504, Width::Word, 0x20000000 + ptr);
+    ecb.write(0x000, Width::Word, 1);
+    ASSERT_EQ(ecb.read(0x100, Width::Word), 1u);
+
+    for (int i = 0; i < 16; i++)
+        ASSERT_EQ(bus.read8(0x20000000 + ptr + 32 + i), expected[i]);
+}
+
+void test_stopecb() {
+    ECB ecb;
+    ecb.write(0x004, Width::Word, 1); // STOPECB
+    // Should not crash; ERRORECB might be set
+}
+
+void test_event_clear() {
+    RAM ram(1024);
+    Bus bus;
+    bus.set_fast_path(nullptr, 0, ram.data(), 0x20000000, ram.size());
+    ECB ecb;
+    ecb.set_bus(&bus);
+
+    memset(ram.data() + 0x100, 0, 48);
+    ecb.write(0x504, Width::Word, 0x20000100);
+    ecb.write(0x000, Width::Word, 1);
+    ASSERT_EQ(ecb.read(0x100, Width::Word), 1u);
+    ecb.write(0x100, Width::Word, 0);
+    ASSERT_EQ(ecb.read(0x100, Width::Word), 0u);
+}
+
 int main() {
     RUN(test_registers);
     RUN(test_inten);
     RUN(test_aes_encrypt);
     RUN(test_no_bus_error);
+    RUN(test_aes_zero_key);
+    RUN(test_stopecb);
+    RUN(test_event_clear);
     TEST_REPORT();
 }

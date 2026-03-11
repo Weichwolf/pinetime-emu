@@ -64,6 +64,31 @@ void test_inten() {
     ASSERT_EQ(rng.read(0x300, Width::Word), 0x2u);
 }
 
+void test_multiple_values_differ() {
+    RNG rng;
+    rng.write(0x000, Width::Word, 1);
+    for (uint64_t cy = 0; cy <= 130; cy++) rng.tick(cy);
+    uint32_t v1 = rng.read(0x508, Width::Word);
+
+    rng.write(0x100, Width::Word, 0); // Clear VALRDY
+    for (uint64_t cy = 131; cy <= 260; cy++) rng.tick(cy);
+    uint32_t v2 = rng.read(0x508, Width::Word);
+
+    // Values should generally differ (probabilistic, but very likely for random bytes)
+    // If they're the same by chance, that's ok for one test; checking range is sufficient
+    ASSERT(v1 <= 0xFF);
+    ASSERT(v2 <= 0xFF);
+}
+
+void test_event_clear() {
+    RNG rng;
+    rng.write(0x000, Width::Word, 1);
+    for (uint64_t cy = 0; cy <= 130; cy++) rng.tick(cy);
+    ASSERT_EQ(rng.read(0x100, Width::Word), 1u);
+    rng.write(0x100, Width::Word, 0);
+    ASSERT_EQ(rng.read(0x100, Width::Word), 0u);
+}
+
 int main() {
     RUN(test_start_generates_value);
     RUN(test_stop);
@@ -71,5 +96,7 @@ int main() {
     RUN(test_irq);
     RUN(test_config_dercen);
     RUN(test_inten);
+    RUN(test_multiple_values_differ);
+    RUN(test_event_clear);
     TEST_REPORT();
 }

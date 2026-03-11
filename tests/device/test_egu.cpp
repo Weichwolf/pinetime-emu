@@ -57,6 +57,30 @@ void test_inten() {
     ASSERT_EQ(egu.read(0x300, Width::Word), 0xFF00u);
 }
 
+void test_all_16_channels() {
+    EGU egu;
+    for (int i = 0; i < 16; i++) {
+        egu.write(i * 4, Width::Word, 1); // TRIGGER[i]
+        ASSERT_EQ(egu.read(0x100 + i*4, Width::Word), 1u);
+    }
+}
+
+void test_irq_multiple_events() {
+    EGU egu;
+    NVIC nvic;
+    bool irq_pending = false;
+    nvic.set_irq_pending_flag(&irq_pending);
+    egu.set_nvic(&nvic, 20);
+
+    egu.write(0x304, Width::Word, (1u << 0) | (1u << 5)); // Enable ch 0 and 5
+    egu.write(0x000, Width::Word, 1); // TRIGGER[0]
+    ASSERT(nvic.is_pending(20));
+
+    nvic.clear_pending(20);
+    egu.write(0x014, Width::Word, 1); // TRIGGER[5]
+    ASSERT(nvic.is_pending(20));
+}
+
 int main() {
     RUN(test_trigger);
     RUN(test_trigger_multiple);
@@ -64,5 +88,7 @@ int main() {
     RUN(test_irq);
     RUN(test_irq_not_fired_without_enable);
     RUN(test_inten);
+    RUN(test_all_16_channels);
+    RUN(test_irq_multiple_events);
     TEST_REPORT();
 }

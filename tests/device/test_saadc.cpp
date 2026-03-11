@@ -101,6 +101,38 @@ void test_event_clear() {
     ASSERT_EQ(saadc.read(0x100, Width::Word), 0u);
 }
 
+void test_battery_voltage_range() {
+    RAM ram(1024);
+    Bus bus;
+    bus.set_fast_path(nullptr, 0, ram.data(), 0x20000000, ram.size());
+    SAADC saadc;
+    saadc.set_bus(&bus);
+    saadc.write(0x500, Width::Word, 1);
+    saadc.write(0x510, Width::Word, 8); // AIN7
+    saadc.write(0x62C, Width::Word, 0x20000100);
+    saadc.write(0x630, Width::Word, 1);
+    saadc.write(0x004, Width::Word, 1);
+
+    uint16_t result = bus.read16(0x20000100);
+    // Battery ~4.0V, 1/5 gain, 0.6V ref: ~1092
+    ASSERT(result > 900);
+    ASSERT(result < 1300);
+}
+
+void test_multiple_channels_config() {
+    SAADC saadc;
+    for (int i = 0; i < 8; i++) {
+        saadc.write(0x510 + i*0x10, Width::Word, i + 1); // PSELP
+        ASSERT_EQ(saadc.read(0x510 + i*0x10, Width::Word), (uint32_t)(i + 1));
+    }
+}
+
+void test_oversample() {
+    SAADC saadc;
+    saadc.write(0x5F4, Width::Word, 4); // OVERSAMPLE=16x
+    ASSERT_EQ(saadc.read(0x5F4, Width::Word), 4u);
+}
+
 int main() {
     RUN(test_initial_state);
     RUN(test_enable);
@@ -113,5 +145,8 @@ int main() {
     RUN(test_irq);
     RUN(test_inten);
     RUN(test_event_clear);
+    RUN(test_battery_voltage_range);
+    RUN(test_multiple_channels_config);
+    RUN(test_oversample);
     TEST_REPORT();
 }

@@ -260,9 +260,9 @@ private:
         case 0x3C: return 0; // AFSR
         case 0x88: return cpacr_;
         // FP extension registers (at 0xF34, 0xF38, 0xF3C offset from E000ED00)
-        case 0x34 + 0x100: return fpccr_;
-        case 0x38 + 0x100: return fpcar_;
-        case 0x3C + 0x100: return fpdscr_;
+        case 0x34 + 0x200: return fpccr_;
+        case 0x38 + 0x200: return fpcar_;
+        case 0x3C + 0x200: return fpdscr_;
         }
         return 0;
     }
@@ -306,9 +306,9 @@ private:
             break;
         case 0x24: shcsr_ = val; break;
         case 0x88: cpacr_ = val; break;
-        case 0x34 + 0x100: fpccr_ = val; break;
-        case 0x38 + 0x100: fpcar_ = val; break;
-        case 0x3C + 0x100: fpdscr_ = val; break;
+        case 0x34 + 0x200: fpccr_ = val; break;
+        case 0x38 + 0x200: fpcar_ = val; break;
+        case 0x3C + 0x200: fpdscr_ = val; break;
         }
     }
 };

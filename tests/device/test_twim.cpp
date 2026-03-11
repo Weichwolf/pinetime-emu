@@ -162,6 +162,89 @@ void test_inten() {
     ASSERT_EQ(twim.read(0x300, Width::Word), 0xF0u);
 }
 
+void test_shorts_lastrx_stop() {
+    RAM ram(256);
+    Bus bus;
+    bus.set_fast_path(nullptr, 0, ram.data(), 0x20000000, ram.size());
+    MockI2C dev;
+    dev.read_data[0] = 0x42;
+    dev.read_data_len = 1;
+    TWIM twim;
+    twim.set_bus(&bus);
+    twim.attach(0x15, &dev);
+
+    twim.write(0x200, Width::Word, 1u << 12); // LASTRX_STOP
+    twim.write(0x588, Width::Word, 0x15);
+    twim.write(0x534, Width::Word, 0x20000000);
+    twim.write(0x538, Width::Word, 1);
+    twim.write(0x000, Width::Word, 1); // STARTRX
+
+    ASSERT_EQ(twim.read(0x104, Width::Word), 1u); // STOPPED
+    ASSERT_EQ(bus.read8(0x20000000), 0x42);
+}
+
+void test_no_device_at_address() {
+    RAM ram(256);
+    Bus bus;
+    bus.set_fast_path(nullptr, 0, ram.data(), 0x20000000, ram.size());
+    TWIM twim;
+    twim.set_bus(&bus);
+    // No device attached at 0x99
+
+    twim.write(0x588, Width::Word, 0x99);
+    twim.write(0x544, Width::Word, 0x20000000);
+    twim.write(0x548, Width::Word, 1);
+    twim.write(0x008, Width::Word, 1); // STARTTX
+    // Should not crash, just silently ignore
+}
+
+void test_multiple_devices() {
+    RAM ram(256);
+    Bus bus;
+    bus.set_fast_path(nullptr, 0, ram.data(), 0x20000000, ram.size());
+    MockI2C dev1, dev2;
+    dev1.read_data[0] = 0xAA; dev1.read_data_len = 1;
+    dev2.read_data[0] = 0xBB; dev2.read_data_len = 1;
+
+    TWIM twim;
+    twim.set_bus(&bus);
+    twim.attach(0x15, &dev1);
+    twim.attach(0x44, &dev2);
+
+    // Read from dev1
+    twim.write(0x588, Width::Word, 0x15);
+    twim.write(0x534, Width::Word, 0x20000000);
+    twim.write(0x538, Width::Word, 1);
+    twim.write(0x000, Width::Word, 1);
+    ASSERT_EQ(bus.read8(0x20000000), 0xAA);
+
+    // Read from dev2
+    twim.write(0x588, Width::Word, 0x44);
+    twim.write(0x534, Width::Word, 0x20000010);
+    twim.write(0x538, Width::Word, 1);
+    twim.write(0x000, Width::Word, 1);
+    ASSERT_EQ(bus.read8(0x20000010), 0xBB);
+}
+
+void test_event_clear() {
+    RAM ram(256);
+    Bus bus;
+    bus.set_fast_path(nullptr, 0, ram.data(), 0x20000000, ram.size());
+    MockI2C dev;
+    TWIM twim;
+    twim.set_bus(&bus);
+    twim.attach(0x15, &dev);
+
+    twim.write(0x588, Width::Word, 0x15);
+    twim.write(0x544, Width::Word, 0x20000000);
+    twim.write(0x548, Width::Word, 1);
+    twim.write(0x008, Width::Word, 1);
+
+    ASSERT_EQ(twim.read(0x150, Width::Word), 1u);
+    twim.write(0x150, Width::Word, 0);
+    ASSERT_EQ(twim.read(0x150, Width::Word), 0u);
+}
+
 int main() {
     RUN(test_initial_state);
     RUN(test_address);
@@ -173,5 +256,9 @@ int main() {
     RUN(test_errorsrc_clear);
     RUN(test_irq);
     RUN(test_inten);
+    RUN(test_shorts_lastrx_stop);
+    RUN(test_no_device_at_address);
+    RUN(test_multiple_devices);
+    RUN(test_event_clear);
     TEST_REPORT();
 }

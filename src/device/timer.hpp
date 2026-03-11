@@ -103,7 +103,8 @@ public:
             for (int i = 0; i < 6; i++) {
                 if (counter_ == cc_[i]) {
                     ev_compare_[i] = 1;
-                    if (shorts_ & (1u << i)) counter_ = 0; // COMPARE_CLEAR shortcut
+                    if (shorts_ & (1u << i)) counter_ = 0;       // COMPARE_CLEAR
+                    if (shorts_ & (1u << (i + 8))) running_ = false; // COMPARE_STOP
                     if (inten_ & (1u << (16 + i))) fired = true;
                 }
             }

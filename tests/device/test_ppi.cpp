@@ -110,6 +110,68 @@ void test_disabled_channel() {
     ASSERT_EQ(bus.read32(0x20000200), 0u); // Not triggered
 }
 
+void test_event_edge_rearm() {
+    RAM ram(1024);
+    Bus bus;
+    bus.set_fast_path(nullptr, 0, ram.data(), 0x20000000, ram.size());
+    PPI ppi;
+    ppi.set_bus(&bus);
+
+    ppi.write(0x510, Width::Word, 0x20000100);
+    ppi.write(0x514, Width::Word, 0x20000200);
+    ppi.write(0x500, Width::Word, 1);
+
+    // Event triggers
+    bus.write32(0x20000100, 1);
+    ppi.tick(1);
+    ASSERT_EQ(bus.read32(0x20000200), 1u);
+
+    // Clear event and task
+    bus.write32(0x20000100, 0);
+    bus.write32(0x20000200, 0);
+    ppi.tick(2);
+
+    // Re-arm: event rises again
+    bus.write32(0x20000100, 1);
+    ppi.tick(3);
+    ASSERT_EQ(bus.read32(0x20000200), 1u); // Fires again
+}
+
+void test_multiple_channels() {
+    RAM ram(1024);
+    Bus bus;
+    bus.set_fast_path(nullptr, 0, ram.data(), 0x20000000, ram.size());
+    PPI ppi;
+    ppi.set_bus(&bus);
+
+    // Channel 0: ev@100 -> task@200
+    ppi.write(0x510, Width::Word, 0x20000100);
+    ppi.write(0x514, Width::Word, 0x20000200);
+    // Channel 1: ev@108 -> task@208
+    ppi.write(0x518, Width::Word, 0x20000108);
+    ppi.write(0x51C, Width::Word, 0x20000208);
+    ppi.write(0x500, Width::Word, 3); // Enable CH 0+1
+
+    bus.write32(0x20000100, 1);
+    ppi.tick(1);
+    ASSERT_EQ(bus.read32(0x20000200), 1u);
+    ASSERT_EQ(bus.read32(0x20000208), 0u); // CH1 not triggered
+
+    bus.write32(0x20000108, 1);
+    ppi.tick(2);
+    ASSERT_EQ(bus.read32(0x20000208), 1u);
+}
+
+void test_group_enable_disable() {
+    PPI ppi;
+    ppi.write(0x800, Width::Word, 0x07); // CHG[0] = channels 0,1,2
+    ppi.write(0x000, Width::Word, 1); // EN -> CHEN |= 0x07
+    ASSERT_EQ(ppi.read(0x500, Width::Word) & 0x07, 0x07u);
+
+    ppi.write(0x004, Width::Word, 1); // DIS -> CHEN &= ~0x07
+    ASSERT_EQ(ppi.read(0x500, Width::Word) & 0x07, 0u);
+}
+
 int main() {
     RUN(test_chen);
     RUN(test_channel_config);
@@ -118,5 +180,8 @@ int main() {
     RUN(test_tick_event_routing);
     RUN(test_tick_fork);
     RUN(test_disabled_channel);
+    RUN(test_event_edge_rearm);
+    RUN(test_multiple_channels);
+    RUN(test_group_enable_disable);
     TEST_REPORT();
 }

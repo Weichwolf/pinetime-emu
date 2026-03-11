@@ -35,17 +35,26 @@ pinetime-emu/
 │       ├── st7789.hpp        # ST7789 LCD Controller (240×240 RGB565 Framebuffer)
 │       └── i2c_devices.hpp   # CST816S Touch, HRS3300 HR, BMA4xx Accel
 ├── tests/
-│   ├── test_basic.s          # CPU-Grundtest (10 Tests, BKPT-terminiert)
-│   ├── test.ld               # Linker-Script für Tests
-│   └── Makefile
+│   ├── arm/                  # ARM-Assembly-Tests (cross-compiled, im Emulator ausgeführt)
+│   │   ├── test_basic.s      # CPU-Grundtest (10 Tests, BKPT-terminiert)
+│   │   ├── test_alu.s        # ALU-Operationen
+│   │   ├── test_thumb32.s    # Thumb-32 Instruktionen
+│   │   ├── test_mem.s        # Memory Load/Store
+│   │   ├── test_vfp.s        # VFP Floating-Point
+│   │   ├── test_it.s         # IT-Blöcke
+│   │   ├── test_exceptions.s # Exception Handling
+│   │   ├── test_peripherals.s # Peripheral-Register
+│   │   ├── test.ld           # Linker-Script
+│   │   └── Makefile          # Standalone-Build (auch via CMake)
 └── CMakeLists.txt
 ```
 
 ## Build
 
 ```bash
-cmake -B build -G Ninja . && ninja -C build          # Emulator
-make -C tests                                         # ARM-Tests
+cmake -B build -G Ninja . && ninja -C build          # Emulator + alle Tests
+ctest --test-dir build                                # 30 Tests (22 C++ + 8 ARM)
+make -C tests/arm                                     # ARM-Tests standalone
 ```
 
 ## Ausführen
