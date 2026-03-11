@@ -145,10 +145,67 @@ Tests terminieren via BKPT. R0=0 = PASS, R0=N = Test N fehlgeschlagen.
 - WFI/WFE Wakeup trotz PRIMASK: Pending Interrupts wecken CPU aus WFI/WFE auch bei PRIMASK=1.
 - NVIC Event Register: Interrupts setzen event_reg für WFE-Wakeup.
 
-**Offen**:
-- Performance-Optimierung (aktuell ~1x Echtzeit)
-- FPU Lazy Stacking (EXC_RETURN bit[4]) in exception_entry/return
-- Watchface zeigt 00:00 (kein RTC time-of-day)
+**Tests**: 30 Suites (22 C++ Unit + 8 ARM Assembly), 225 ARM-Tests + 348 C++ Tests = 573 gesamt.
+
+## Roadmap: Produktiver Emulator
+
+### Phase 1: CPU härten — ⬚ offen
+Ziel: Korrektheit gegen ISA-Spec, nicht nur gegen InfiniTime.
+- ⬚ ARM Architecture Compliance Tests (oder Äquivalent) durchlaufen
+- ⬚ Alle Encoding-Varianten systematisch (Shift by 32, unpredictable encodings)
+- ⬚ FPU Lazy Stacking (EXC_RETURN bit[4])
+- ⬚ Exception Tail-Chaining + Late-Arrival
+- ⬚ MPU (Memory Protection Unit)
+- ⬚ Fault-Handler trennen (MemManage, BusFault, UsageFault)
+- ⬚ LDREX/STREX Exclusive Monitor (statt always-succeed)
+
+### Phase 2: Event-Scheduler — ⬚ offen (höchster ROI)
+Ziel: Timing-korrekte Peripheral-Interaktion statt 10k-Zyklus-Batches.
+- ⬚ Event-Queue: Peripheral meldet `next_event() → uint64_t`
+- ⬚ CPU läuft bis zum nächsten Event, nicht bis zum Batch-Ende
+- ⬚ Eliminiert Polling-Timing-Bugs (RNG, SysTick, DMA-Completion)
+- ⬚ ~200 Zeilen Scheduler, tick()-Signatur anpassen
+
+### Phase 3: Peripherals vertiefen — ⬚ offen
+Ziel: Korrektheit für beliebige nRF52-Firmware, nicht nur InfiniTime.
+- ⬚ UARTE (Serial Output — essentiell für Debug)
+- ⬚ SPIM/TWIM: Error Conditions, NACK, Timeout
+- ⬚ RADIO: State Machine (DISABLED↔TXRU↔TX↔TXDISABLE↔RXRU↔RX↔...)
+- ⬚ BLE via HCI over TCP: RADIO TX/RX → HCI H4 Framing → TCP Server (:9001)
+  - Emulator = HCI Controller (Server), Host-Stack = Client
+  - BlueZ vhci, Bumble, oder eigene App als Gegenstelle
+  - Ermöglicht Test von Companion-Apps (Gadgetbridge, InfiniLink) gegen Emulator
+  - Schwierigkeit: SoftDevice steuert RADIO direkt, Übersetzung Register→HCI nötig
+- ⬚ GPIO: SENSE ohne Auto-Toggle-Hack, PIN_CNF vollständig
+- ⬚ NVMC: Write-Timing, READY-Flag
+- ⬚ DMA: Timing + Bus-Arbitrierung statt instant
+- ⬚ WDT: Timeout → Reset
+- ⬚ Timer: Korrekte Prescaler-Interaktion, alle Short-Chains
+
+### Phase 4: Tooling — ⬚ offen
+Ziel: Entwickler-Workflow statt Spielzeug.
+- ⬚ GDB Stub (RSP über TCP, ~500 Zeilen → VSCode/arm-gdb kompatibel)
+- ⬚ Snapshot/Restore (State serialisieren für Replay)
+- ⬚ Instruktions-Trace (Diff gegen Hardware-Trace)
+- ⬚ Multi-Firmware CI (Zephyr, mbed, bare-metal Samples)
+
+### Phase 5: Performance — ⬚ offen
+Ziel: >5x Echtzeit.
+- ⬚ Cached Decode (Instruktion einmal dekodieren → Dispatch-Table, 3-5x)
+- ⬚ Block-Chaining (lineare Blöcke ohne Branches zusammenfassen)
+- ⬚ Optional: JIT (10-50x, aber eigenes Projekt)
+
+### Bestandsaufnahme (was steht, was nicht)
+| Komponente | Status | Produktiv-tauglich? |
+|-----------|--------|---------------------|
+| Bus-Architektur | ✓ | Ja — Fast/Slow-Path korrekt |
+| Device-Interface | ✓ | Ja — read/write/tick erweiterbar |
+| EmulatorContext | ✓ | Ja — zentralisierte Verdrahtung |
+| Thumb-2 Core | ✓ ~90% | Nein — Edge Cases, Compliance fehlt |
+| VFP/FPU | ✓ ~80% | Nein — Lazy Stacking, Exceptions fehlt |
+| Exception Model | ✓ ~85% | Nein — Tail-Chain, MPU-Faults fehlt |
+| nRF52 Peripherals | ✓ Happy Path | Nein — Error Handling, Timing fehlt |
+| Test-Infrastruktur | ✓ | Ja — C++ + ARM dual-system |
 
 ## Workflow
 
@@ -156,8 +213,14 @@ Nach jedem Fortschritt (neue Peripherals, Bug-Fixes, bestandene Tests):
 1. CLAUDE.md aktualisieren (Status, neue Dateien, bekannte Issues)
 2. Commit
 
-## Nicht-Ziele
+## Aktuell offen
 
-- Cycle-Accuracy
-- Vollständige nRF52-Peripherie (nur was InfiniTime braucht)
+- Performance ~1x Echtzeit (interpretiert, kein Decode-Cache)
+- Watchface zeigt 00:00 (kein RTC time-of-day)
+- tick_peripherals() alle 10k Zyklen (zu grob für Polling-Peripherals)
+
+## Nicht-Ziele (aktuell)
+
+- Cycle-Accuracy (bewusst — siehe Phase 5 für spätere Option)
 - BLE Radio-Emulation (SoftDevice-Blob läuft mit, BLE-Pakete gehen nirgends hin)
+- JIT-Compilation (interpretiert reicht für Entwicklung)
