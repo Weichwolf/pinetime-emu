@@ -14,7 +14,7 @@ pinetime-emu/
 ├── src/
 │   ├── main.cpp              # EmulatorContext, alle Peripherals verdrahtet, SDL2 Main-Loop
 │   ├── cpu.hpp               # Cortex-M4F State + Interface
-│   ├── cpu.cpp               # Thumb-2 Execution Engine (~1500 Zeilen)
+│   ├── cpu.cpp               # Thumb-2 Execution Engine (~2200 Zeilen)
 │   ├── bus.hpp               # Device Interface, Bus mit Fast-Path
 │   └── device/
 │       ├── memory.hpp        # Flash (read-only) + RAM
@@ -25,7 +25,7 @@ pinetime-emu/
 │       ├── spim.hpp          # SPIM mit EasyDMA + SpiCallback
 │       ├── twim.hpp          # TWIM mit EasyDMA + I2CDevice-Interface
 │       ├── nvmc.hpp          # Flash Controller (CONFIG/ERASEPAGE)
-│       ├── radio.hpp         # BLE Radio (TX instant, RX stub)
+│       ├── radio.hpp         # BLE Radio (State Machine, TX/RX, Shorts)
 │       ├── ppi.hpp           # PPI (Programmable Peripheral Interconnect)
 │       ├── saadc.hpp         # SAADC (ADC, simuliert Batteriespannung)
 │       ├── temp.hpp          # TEMP (Die-Temperatur, 21°C)
@@ -34,7 +34,9 @@ pinetime-emu/
 │       ├── uarte.hpp         # UARTE (UART mit EasyDMA, TX via Callback)
 │       ├── wdt.hpp           # Watchdog (Timeout, tick/next_event, Reload)
 │       ├── st7789.hpp        # ST7789 LCD Controller (240×240 RGB565 Framebuffer)
-│       └── i2c_devices.hpp   # CST816S Touch, HRS3300 HR, BMA4xx Accel
+│       ├── i2c_devices.hpp   # CST816S Touch, HRS3300 HR, BMA4xx Accel
+│       ├── spi_flash.hpp     # Ext. SPI NOR Flash 4MB (MX25L Protokoll)
+│       └── egu.hpp           # Event Generator Unit (Software-Interrupts)
 ├── tests/
 │   ├── arm/                  # ARM-Assembly-Tests (cross-compiled, im Emulator ausgeführt)
 │   │   ├── test_basic.s      # CPU-Grundtest (10 Tests, BKPT-terminiert)
@@ -47,6 +49,8 @@ pinetime-emu/
 │   │   ├── test_peripherals.s # Peripheral-Register
 │   │   ├── test_fpu_exceptions.s # FPU Context Stacking in Exceptions
 │   │   ├── test_faults.s     # Fault-Handler (UsageFault, HardFault, CFSR, MPU)
+│   │   ├── test_vfp_fused.s  # VFP Fused Multiply-Add (VFMA, VFMS, VFNMA, VFNMS)
+│   │   ├── test_vfp_negmul.s # VFP Negated Multiply (VNMUL, VNMLA, VNMLS)
 │   │   ├── test.ld           # Linker-Script
 │   │   └── Makefile          # Standalone-Build (auch via CMake)
 └── CMakeLists.txt
@@ -56,7 +60,7 @@ pinetime-emu/
 
 ```bash
 cmake -B build -G Ninja . && ninja -C build          # Emulator + alle Tests
-ctest --test-dir build                                # 31 Suites (23 C++ + 8 ARM), 364 Tests
+ctest --test-dir build                                # 35 Suites (23 C++ + 12 ARM)
 make -C tests/arm                                     # ARM-Tests standalone
 ```
 
@@ -113,9 +117,9 @@ Thumb-2 ISA, organisiert in Gruppen:
 | 0x40009000 | TIMER1 | timer.hpp |
 | 0x4000A000 | TIMER2 | timer.hpp |
 | 0x40002000 | UARTE0 (Serial) | uarte.hpp |
+| 0x4000B000 | RTC0 | timer.hpp |
 | 0x40010000 | WDT | wdt.hpp |
-| 0x40011000 | RTC0 | timer.hpp |
-| 0x40014000 | RTC1 | timer.hpp |
+| 0x40011000 | RTC1 | timer.hpp |
 | 0x40024000 | RTC2 | timer.hpp |
 | 0x4001E000 | NVMC | nvmc.hpp |
 | 0x50000000 | GPIO P0 | gpio.hpp |
@@ -126,6 +130,8 @@ Thumb-2 ISA, organisiert in Gruppen:
 | 0x4000D000 | RNG | rng.hpp |
 | 0x4000E000 | ECB (AES-128) | ecb.hpp |
 | 0x4001F000 | PPI | ppi.hpp |
+| 0x40014000–0x40019000 | EGU0–EGU5 (Software-Interrupts) | egu.hpp |
+| Ext. SPI | SPI NOR Flash 4MB (MX25L) | spi_flash.hpp |
 | Stubs | FPU access port, CCM/AAR | main.cpp |
 
 ## Test-Konvention
@@ -134,9 +140,9 @@ Tests terminieren via BKPT. R0=0 = PASS, R0=N = Test N fehlgeschlagen.
 
 ## Status
 
-**CPU**: Thumb-2 Core + VFPv4-D16 FPU (single+double precision). IT-Blöcke, Exceptions mit FPU Lazy Stacking, LDREX/STREX Exclusive Monitor, interrupt-driven scheduling. 9 ARM-Testsuites (181 Tests) + 43 C++ Unit-Tests bestehen.
-**Peripherals**: Alle nRF52-Peripherals implementiert: UARTE, Radio (korrekte State Machine), PPI, SAADC, TEMP, RNG, ECB, NVMC, SysTick, NVIC, SPIM, TWIM (ANACK-Erkennung), Timers, RTCs, GPIO/GPIOTE, WDT (Timeout+Reload), CLOCK/POWER.
-**PineTime**: ST7789 (SPI→Framebuffer→SDL2), CST816S Touch (WASD=Swipe, Maus=Tap, Space=Button), HRS3300, BMA4xx. Ext. SPI Flash 4MB.
+**CPU**: Thumb-2 Core + VFPv4-D16 FPU (single+double precision). IT-Blöcke, Exceptions mit FPU Lazy Stacking, LDREX/STREX Exclusive Monitor, Decode-Cache + Block-Chaining (~3x Echtzeit).
+**Peripherals**: Alle nRF52-Peripherals implementiert: UARTE, Radio (State Machine), PPI, SAADC, TEMP, RNG, ECB, NVMC, SysTick, NVIC, SPIM, TWIM (ANACK), Timers, RTCs, GPIO/GPIOTE, WDT, EGU0–5, CLOCK/POWER.
+**PineTime**: ST7789 (SPI→Framebuffer→SDL2), CST816S Touch (WASD=Swipe, Maus=Tap, Space=Button), HRS3300 (PPG, 75 BPM), BMA4xx (Step Counter). Ext. SPI NOR Flash 4MB (MX25L).
 **Firmware**: `firmware/merged-internal.bin` — InfiniTime 1.14.1 + MCUBoot Bootloader.
 
 **InfiniTime Boot**: ✓ Erfolgreich. MCUBoot → InfiniTime Handoff, Display ON, Digital Watchface gerendert (8k/58k Pixel), FreeRTOS stabil (10s Laufzeit, Scheduler aktiv, Tasks laufen).
@@ -149,7 +155,7 @@ Tests terminieren via BKPT. R0=0 = PASS, R0=N = Test N fehlgeschlagen.
 - WFI/WFE Wakeup trotz PRIMASK: Pending Interrupts wecken CPU aus WFI/WFE auch bei PRIMASK=1.
 - NVIC Event Register: Interrupts setzen event_reg für WFE-Wakeup.
 
-**Tests**: 31 Suites (23 C++ + 8 ARM), 364 Tests gesamt.
+**Tests**: 35 Suites (23 C++ + 12 ARM).
 
 ## Roadmap: Produktiver Emulator
 
@@ -161,7 +167,7 @@ Ziel: Korrektheit gegen ISA-Spec, nicht nur gegen InfiniTime.
 - ✓ Encoding Edge Cases (shift_c: amount=32/33+, LSL/LSR/ASR/ROR korrekt)
 - ✓ MPU Stub (8 Regions, akzeptiert Config, kein Enforcement — reicht für FreeRTOS)
 - ✓ Fault-Handler getrennt (UsageFault/BusFault/MemManage mit SHCSR-Enable, CFSR/HFSR W1C, Escalation zu HardFault)
-- ✓ 10 ARM-Testsuites (191 Tests) + 43 C++ Unit-Tests, InfiniTime-Boot verifiziert
+- ✓ 35 Testsuites (23 C++ + 12 ARM), InfiniTime-Boot verifiziert
 
 ### Phase 2: Event-Scheduler — ✓ abgeschlossen
 Ziel: Timing-korrekte Peripheral-Interaktion statt 10k-Zyklus-Batches.
@@ -187,20 +193,17 @@ Ziel: Korrektheit für beliebige nRF52-Firmware, nicht nur InfiniTime.
 - — Timer Shorts: Waren schon komplett (COMPARE_CLEAR + COMPARE_STOP)
 - — DMA Timing: Instant genügt für alle aktuellen Firmware
 
-### Phase 4: Tooling — ⬚ offen
-Ziel: Entwickler-Workflow statt Spielzeug.
-- ⬚ GDB Stub (RSP über TCP, ~500 Zeilen → VSCode/arm-gdb kompatibel)
-- ⬚ Snapshot/Restore (State serialisieren für Replay)
-- ⬚ Instruktions-Trace (Diff gegen Hardware-Trace)
-- ⬚ Multi-Firmware CI (Zephyr, mbed, bare-metal Samples)
+### Phase 4: Performance — ✓ abgeschlossen
+Ziel: >3x Echtzeit (Interpreter-Limit ohne JIT).
+- ✓ Cached Decode (OpClass pro Halfword → Single-Level Dispatch statt 3-Level)
+- ✓ Direct Flash Access (Pointer statt Bus::read16 → kein Virtual Call overhead)
+- ✓ Inner Loop (irq_pending/breakpoint nur am Loop-Rand, nicht pro Instruktion)
+- ✓ O3 + LTO (Link-Time Optimization für Cross-TU Inlining)
+- ✓ Cache-Invalidierung bei NVMC Flash Write/Erase
+- Ergebnis: 2.3x → 3.1x Echtzeit (36% schneller, ~7ns/Instruktion)
+- PGO getestet, kein weiterer Gewinn (<1%)
 
-### Phase 5: Performance — ⬚ offen
-Ziel: >5x Echtzeit.
-- ⬚ Cached Decode (Instruktion einmal dekodieren → Dispatch-Table, 3-5x)
-- ⬚ Block-Chaining (lineare Blöcke ohne Branches zusammenfassen)
-- ⬚ Optional: JIT (10-50x, aber eigenes Projekt)
-
-### Phase 6: BLE via HCI over TCP — ⬚ offen
+### Phase 5: BLE via HCI over TCP — ⬚ offen
 Ziel: BLE-Kommunikation mit externem Host-Stack (Gadgetbridge, Bumble, BlueZ).
 
 **Architektur:**
@@ -255,13 +258,3 @@ Nach jedem Fortschritt (neue Peripherals, Bug-Fixes, bestandene Tests):
 1. CLAUDE.md aktualisieren (Status, neue Dateien, bekannte Issues)
 2. Commit
 
-## Aktuell offen
-
-- Performance ~1x Echtzeit (interpretiert, kein Decode-Cache)
-- Watchface zeigt 00:00 (kein RTC time-of-day)
-
-## Nicht-Ziele (aktuell)
-
-- Cycle-Accuracy (bewusst — siehe Phase 5 für spätere Option)
-- BLE Radio-Emulation (SoftDevice-Blob läuft mit, BLE-Pakete gehen nirgends hin)
-- JIT-Compilation (interpretiert reicht für Entwicklung)

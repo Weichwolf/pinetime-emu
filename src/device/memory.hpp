@@ -1,9 +1,11 @@
 #pragma once
 #include "../bus.hpp"
 #include <cstring>
+#include <functional>
 #include <vector>
 
 namespace pt {
+
 
 class RAM : public Device {
     std::vector<uint8_t> mem_;
@@ -48,9 +50,11 @@ private:
 class Flash : public Device {
     std::vector<uint8_t> mem_;
     const uint32_t* nvmc_config_ = nullptr;  // Points to NVMC config register
+    std::function<void(uint32_t, uint32_t)> on_write_;  // Callback(addr, len) for cache invalidation
 public:
     explicit Flash(uint32_t size) : mem_(size, 0xFF) {}
     void set_nvmc_config(const uint32_t* cfg) { nvmc_config_ = cfg; }
+    void set_on_write(std::function<void(uint32_t, uint32_t)> cb) { on_write_ = cb; }
 
     uint32_t read(uint32_t addr, Width w) override {
         if (addr + static_cast<uint32_t>(w) > mem_.size()) return 0;
@@ -89,6 +93,7 @@ public:
             mem_[addr+2] &= val >> 16; mem_[addr+3] &= val >> 24;
             break;
         }
+        if (on_write_) on_write_(addr, static_cast<uint32_t>(w));
     }
 
     uint8_t* data() { return mem_.data(); }

@@ -286,8 +286,8 @@ void test_hrs_als_values() {
     hrs.i2c_write(&reg, 1);
     uint8_t m;
     hrs.i2c_read(&m, 1);
-    // m should be 0x0C per code
-    ASSERT_EQ(m, 0x0C);
+    // ALS ≈ 2 (sensor pressed against skin)
+    ASSERT_EQ(m, 0x00);
 
     reg = 0x0D;
     hrs.i2c_write(&reg, 1);
@@ -299,7 +299,7 @@ void test_hrs_als_values() {
     hrs.i2c_write(&reg, 1);
     uint8_t l;
     hrs.i2c_read(&l, 1);
-    ASSERT_EQ(l, 0x04);
+    ASSERT_EQ(l, 0x02);
 }
 
 void test_hrs_enable_disable() {

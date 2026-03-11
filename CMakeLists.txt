@@ -14,7 +14,8 @@ add_executable(pinetime-emu
 
 target_include_directories(pinetime-emu PRIVATE src ${SDL2_INCLUDE_DIRS})
 target_link_libraries(pinetime-emu PRIVATE ${SDL2_LIBRARIES})
-target_compile_options(pinetime-emu PRIVATE -Wall -Wextra -Wpedantic -O2)
+target_compile_options(pinetime-emu PRIVATE -Wall -Wextra -Wpedantic -O3 -march=native -flto)
+target_link_options(pinetime-emu PRIVATE -flto)
 
 # C++ unit tests (no SDL2 dependency)
 enable_testing()
