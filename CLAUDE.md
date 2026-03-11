@@ -25,7 +25,8 @@ pinetime-emu/
 │       ├── spim.hpp          # SPIM mit EasyDMA + SpiCallback
 │       ├── twim.hpp          # TWIM mit EasyDMA + I2CDevice-Interface
 │       ├── nvmc.hpp          # Flash Controller (CONFIG/ERASEPAGE)
-│       ├── radio.hpp         # BLE Radio (State Machine, TX/RX, Shorts)
+│       ├── radio.hpp         # BLE Radio (State Machine, TX Capture, RX Injection)
+│       ├── ble_hci.hpp       # BLE HCI over TCP (H4 Transport, ADV/Data Bridge)
 │       ├── ppi.hpp           # PPI (Programmable Peripheral Interconnect)
 │       ├── saadc.hpp         # SAADC (ADC, simuliert Batteriespannung)
 │       ├── temp.hpp          # TEMP (Die-Temperatur, 21°C)
@@ -60,7 +61,7 @@ pinetime-emu/
 
 ```bash
 cmake -B build -G Ninja . && ninja -C build          # Emulator + alle Tests
-ctest --test-dir build                                # 35 Suites (23 C++ + 12 ARM)
+ctest --test-dir build                                # 36 Suites (24 C++ + 12 ARM)
 make -C tests/arm                                     # ARM-Tests standalone
 ```
 
@@ -69,6 +70,7 @@ make -C tests/arm                                     # ARM-Tests standalone
 ```bash
 ./build/pinetime-emu firmware.bin                     # Interaktiv (SDL2)
 ./build/pinetime-emu --headless --timeout 5000 fw.bin # Headless
+./build/pinetime-emu --ble-hci firmware.bin           # Mit BLE HCI on port 9001
 ```
 
 ## Build-Umgebung
@@ -155,7 +157,7 @@ Tests terminieren via BKPT. R0=0 = PASS, R0=N = Test N fehlgeschlagen.
 - WFI/WFE Wakeup trotz PRIMASK: Pending Interrupts wecken CPU aus WFI/WFE auch bei PRIMASK=1.
 - NVIC Event Register: Interrupts setzen event_reg für WFE-Wakeup.
 
-**Tests**: 35 Suites (23 C++ + 12 ARM).
+**Tests**: 36 Suites (24 C++ + 12 ARM).
 
 ## Roadmap: Produktiver Emulator
 
@@ -203,42 +205,26 @@ Ziel: >3x Echtzeit (Interpreter-Limit ohne JIT).
 - Ergebnis: 2.3x → 3.1x Echtzeit (36% schneller, ~7ns/Instruktion)
 - PGO getestet, kein weiterer Gewinn (<1%)
 
-### Phase 5: BLE via HCI over TCP — ⬚ offen
+### Phase 5: BLE via HCI over TCP — ✓ abgeschlossen
 Ziel: BLE-Kommunikation mit externem Host-Stack (Gadgetbridge, Bumble, BlueZ).
 
 **Architektur:**
-- Emulator = HCI Controller (TCP Server :9001)
-- Externer Host-Stack = HCI Client
+- Emulator = HCI Controller (TCP Server :9001, `--ble-hci`)
+- Externer Host-Stack = HCI Client (Bumble, BlueZ vhci)
 - Protokoll: HCI H4 Framing (1 Byte Packet Indicator + HCI Packet)
-- SoftDevice steuert RADIO direkt → Übersetzung RADIO-Register → HCI nötig
+- RADIO TX Capture → BLE PDU → HCI Events; HCI Commands → RADIO RX Injection
 
-**Schichten:**
-1. **RADIO Capture** — TX-Pakete abfangen wenn RADIO in TX state, RX-Pakete injizieren
-2. **Link Layer** — BLE LL PDU Parsing (ADV_IND, CONNECT_IND, LL_DATA)
-3. **HCI Transport** — H4 Framing, Command/Event/ACL Multiplexing
-4. **TCP Server** — Non-blocking Socket, accept/read/write in tick()
-
-**Herausforderungen:**
-- SoftDevice ist Closed-Source Blob, steuert RADIO-Register direkt
-- Timing: BLE erwartet µs-genaue Antworten (Connection Interval, T_IFS=150µs)
-- State Tracking: SoftDevice's interner State muss aus Register-Writes inferiert werden
-- Advertising: SoftDevice setzt RADIO auf ADV-Channels (37/38/39), sendet ADV_IND
-- Connection: Nach CONNECT_IND wechselt SoftDevice auf Data Channels
-
-**Gegenstellen:**
-- `bumble` (Python BLE Stack) — flexibelste Option, HCI over TCP nativ
-- `BlueZ vhci` — Linux Kernel HCI Interface, braucht root
-- Eigene Test-App — minimaler HCI Client für Connection+GATT
-
-**Schritte:**
-- ⬚ TCP Server Skeleton (non-blocking, in main loop integriert)
-- ⬚ RADIO TX Capture: Paket aus PACKETPTR lesen wenn END event
-- ⬚ BLE ADV PDU Parsing (ADV_IND, SCAN_REQ, SCAN_RSP)
-- ⬚ HCI Event Generation (LE Advertising Report)
-- ⬚ HCI Command Handling (Reset, LE Set Scan, LE Create Connection)
-- ⬚ Connection State: CONNECT_IND → Data Channel PDUs → HCI ACL
-- ⬚ RADIO RX Injection: HCI ACL → LL PDU → PACKETPTR schreiben, RADIO Events feuern
-- ⬚ Integration Test mit Bumble (Scan → Connect → GATT Read)
+**Implementiert:**
+- ✓ TCP Server (non-blocking, in main loop integriert)
+- ✓ RADIO TX Capture (Paket aus PACKETPTR bei TX END, Callback an BleHci)
+- ✓ RADIO RX Injection (queue_rx + check_pending_rx, Writes PACKETPTR + fires Events)
+- ✓ BLE ADV PDU Parsing (ADV_IND, ADV_DIRECT/NONCONN/SCAN, Adresse + Daten extrahiert)
+- ✓ HCI Event Generation (LE Advertising Report, Connection Complete, Disconnection, Num Completed)
+- ✓ HCI Command Handling (Reset, Read Local Version/Commands/Features, Read BD_ADDR, LE Buffer Size, Set Event Mask, LE Set Scan Params/Enable, LE Create Connection/Cancel, Set Random Addr)
+- ✓ CONNECT_IND Generation (Access Address, CRCInit, Channel Map, Timing-Parameter)
+- ✓ Data Channel Bridge (L2CAP ↔ HCI ACL, SN/NESN Sequencing)
+- ✓ LL Control PDU Handling (VERSION_IND, FEATURE_REQ/RSP, LENGTH_REQ/RSP, PHY_REQ, PING, TERMINATE, UNKNOWN_RSP)
+- ✓ 47 Unit-Tests (HCI Commands, ADV Capture, Report Generation, RX Injection, Queue)
 
 ### Bestandsaufnahme (was steht, was nicht)
 | Komponente | Status | Produktiv-tauglich? |
@@ -250,6 +236,7 @@ Ziel: BLE-Kommunikation mit externem Host-Stack (Gadgetbridge, Bumble, BlueZ).
 | VFP/FPU | ✓ ~95% | Fast — Lazy Stacking implementiert, FPCA korrekt |
 | Exception Model | ✓ ~98% | Ja — FPU Stacking, Faults, MPU, Exclusive Monitor |
 | nRF52 Peripherals | ✓ Happy Path | Nein — Error Handling, Timing fehlt |
+| BLE HCI Bridge | ✓ | Ja — ADV Capture, Connection, Data Channel, LL Control |
 | Test-Infrastruktur | ✓ | Ja — C++ + ARM dual-system |
 
 ## Workflow

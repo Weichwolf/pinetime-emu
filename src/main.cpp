@@ -20,6 +20,7 @@
 #include "device/temp.hpp"
 #include "device/spi_flash.hpp"
 #include "device/egu.hpp"
+#include "device/ble_hci.hpp"
 #include <SDL2/SDL.h>
 #include <algorithm>
 #include <cstdio>
@@ -139,6 +140,7 @@ struct EmulatorContext {
     pt::EGU egu0, egu1, egu2, egu3, egu4, egu5;
     StubDevice stub_device;
     DWT dwt;
+    pt::BleHci ble_hci;
 
     // PineTime devices
     pt::ST7789 display;
@@ -176,6 +178,9 @@ struct EmulatorContext {
         bus.map(0x4000C000, 0x1000, &temp);         // TEMP
         bus.map(0x4000D000, 0x1000, &rng);         // RNG
         radio.set_nvic(&nvic, 1);
+        radio.set_bus(&bus);
+        ble_hci.set_bus(&bus);
+        ble_hci.set_radio(&radio);
         uarte0.set_bus(&bus);
         uarte0.set_nvic(&nvic, 2);  // UARTE0 = IRQ 2
         uarte0.set_tx_callback([](const char* data, size_t len) {
@@ -381,6 +386,7 @@ static int run_headless(EmulatorContext& emu, uint32_t timeout_ms, bool trace) {
             emu.tick_peripherals();
             emu.cpu.check_exceptions();
         }
+        emu.ble_hci.poll(emu.cpu.cycles);
 
         if (emu.cpu.breakpoint_hit) {
             fprintf(stderr, "[BP] PC=0x%08X cy=%.2fM SP=0x%08X LR=0x%08X R0=0x%08X R1=0x%08X R3=0x%08X xPSR=0x%08X prev=0x%08X\n",
@@ -661,8 +667,8 @@ static int run_interactive(EmulatorContext& emu) {
                 emu.tick_peripherals();
                 emu.cpu.check_exceptions();
             }
+            emu.ble_hci.poll(emu.cpu.cycles);
         }
-
 
         // Periodic status (every ~1s emulated time)
         if (emu.cpu.cycles - last_status >= 64'000'000) {
@@ -702,6 +708,7 @@ static void usage(const char* prog) {
     fprintf(stderr, "Usage: %s [options] <firmware.bin>\n", prog);
     fprintf(stderr, "  --headless          Run without display\n");
     fprintf(stderr, "  --timeout <ms>      Timeout in headless mode (default: 5000)\n");
+    fprintf(stderr, "  --ble-hci [port]    BLE HCI over TCP (default port: 9001)\n");
 }
 
 int main(int argc, char* argv[]) {
@@ -709,11 +716,16 @@ int main(int argc, char* argv[]) {
     bool headless = false;
     bool trace = false;
     uint32_t timeout_ms = 5000;
+    int ble_hci_port = 0; // 0 = disabled
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--headless") == 0) headless = true;
         else if (strcmp(argv[i], "--trace") == 0) trace = true;
         else if (strcmp(argv[i], "--timeout") == 0 && i + 1 < argc) timeout_ms = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--ble-hci") == 0) {
+            ble_hci_port = 9001;
+            if (i + 1 < argc && argv[i+1][0] >= '0' && argv[i+1][0] <= '9') ble_hci_port = atoi(argv[++i]);
+        }
         else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) { usage(argv[0]); return 0; }
         else if (argv[i][0] != '-') firmware_path = argv[i];
         else { fprintf(stderr, "Unknown option: %s\n", argv[i]); usage(argv[0]); return 1; }
@@ -731,6 +743,13 @@ int main(int argc, char* argv[]) {
 
     emu.cpu.reset();
     fprintf(stderr, "[EMU] Reset: SP=0x%08X PC=0x%08X\n", emu.cpu.r[13], emu.cpu.r[15]);
+
+    if (ble_hci_port > 0) {
+        if (!emu.ble_hci.start(ble_hci_port)) {
+            fprintf(stderr, "[BLE-HCI] Failed to start on port %d\n", ble_hci_port);
+            return 1;
+        }
+    }
 
     if (headless)
         return run_headless(emu, timeout_ms, trace);

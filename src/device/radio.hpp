@@ -6,8 +6,7 @@
 namespace pt {
 
 // nRF52 RADIO at 0x40001000
-// BLE radio — NimBLE drives this directly
-// For emulation: store config, complete tasks instantly, never receive packets
+// BLE radio with TX capture and RX injection for HCI bridging
 class Radio : public Device {
     // Events
     uint32_t ev_ready_ = 0;
@@ -52,9 +51,59 @@ class Radio : public Device {
 
     NVIC* nvic_ = nullptr;
     uint32_t irq_ = 0;
+    Bus* bus_ = nullptr;
+
+    // TX capture callback: (ctx, pdu, pdu_len, channel)
+    using TxHandler = void(*)(void*, const uint8_t*, size_t, uint8_t);
+    TxHandler tx_handler_ = nullptr;
+    void* tx_handler_ctx_ = nullptr;
+
+    // Pending RX injection
+    struct PendingRx {
+        uint8_t data[264];
+        size_t len = 0;
+        bool pending = false;
+    } pending_rx_;
 
 public:
     void set_nvic(NVIC* nvic, uint32_t irq) { nvic_ = nvic; irq_ = irq; }
+    void set_bus(Bus* b) { bus_ = b; }
+    void set_tx_handler(TxHandler h, void* ctx) { tx_handler_ = h; tx_handler_ctx_ = ctx; }
+
+    uint32_t get_state() const { return state_; }
+    uint32_t get_frequency() const { return frequency_; }
+    uint32_t get_packetptr() const { return packetptr_; }
+
+    // Queue a packet for RX injection (delivered when Radio enters RX)
+    void queue_rx(const uint8_t* data, size_t len) {
+        if (len > sizeof(pending_rx_.data)) return;
+        memcpy(pending_rx_.data, data, len);
+        pending_rx_.len = len;
+        pending_rx_.pending = true;
+    }
+
+    // Inject a received packet immediately (Radio must be in RX state)
+    void inject_rx(const uint8_t* pdu, size_t len) {
+        if (state_ != RX || !bus_) return;
+        for (size_t i = 0; i < len; i++)
+            bus_->write8(packetptr_ + i, pdu[i]);
+        ev_address_ = 1;
+        ev_payload_ = 1;
+        ev_end_ = 1;
+        ev_crcok_ = 1;
+        rssisample_ = 0x40; // ~-64 dBm
+        state_ = RXIDLE;
+        if (shorts_ & (1u << 1)) do_disable(); // END_DISABLE
+        else fire_irq();
+    }
+
+    // Check for pending RX injection (called from BleHci tick)
+    bool check_pending_rx() {
+        if (!pending_rx_.pending || state_ != RX) return false;
+        pending_rx_.pending = false;
+        inject_rx(pending_rx_.data, pending_rx_.len);
+        return true;
+    }
 
     uint32_t read(uint32_t addr, Width) override {
         switch (addr) {
@@ -177,6 +226,19 @@ private:
         TXRU = 9, TXIDLE = 10, TX = 11, TXDISABLE = 12
     };
 
+    void capture_tx() {
+        if (!tx_handler_ || !bus_) return;
+        uint8_t pdu[264];
+        uint8_t s0 = bus_->read8(packetptr_);
+        uint8_t pdu_len = bus_->read8(packetptr_ + 1);
+        pdu[0] = s0;
+        pdu[1] = pdu_len;
+        if (pdu_len > 254) pdu_len = 254;
+        for (int i = 0; i < pdu_len; i++)
+            pdu[2 + i] = bus_->read8(packetptr_ + 2 + i);
+        tx_handler_(tx_handler_ctx_, pdu, 2 + pdu_len, datawhiteiv_ & 0x3F);
+    }
+
     void do_txen() {
         state_ = TXRU;
         // Instant ramp-up (no timing)
@@ -200,11 +262,12 @@ private:
             ev_address_ = 1;
             ev_payload_ = 1;
             ev_end_ = 1;
+            capture_tx();
             state_ = TXIDLE; // Back to idle after instant TX
             if (shorts_ & (1<<1)) do_disable(); // END_DISABLE
             else fire_irq();
         } else if (state_ == RXIDLE) {
-            state_ = RX; // Stay in RX, no packets arrive
+            state_ = RX; // Stay in RX — packets arrive via inject_rx/check_pending_rx
         }
     }
 
