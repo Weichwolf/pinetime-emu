@@ -57,13 +57,18 @@ private:
 
 // HRS3300 Heart Rate Sensor (I2C addr 0x44)
 // Generates synthetic PPG waveform at 72 BPM when enabled.
-// InfiniTime reads via ReadHrs():
-//   m=reg[0x09], h=reg[0x08], l=reg[0x0A]
+// InfiniTime enables with reg[0x01]=0x50 (HWT+PDRIVE, not HEN bit 7).
+// ReadHrsAls(): single 8-byte read from 0x08.
+// HRS: m=reg[0x09], h=reg[0x0A], l=reg[0x0F]
 //   value = (m<<8) | ((h&0xF)<<4) | (l&0xF) | ((l&0x30)<<12)
 class HRS3300 : public I2CDevice {
     uint8_t regs_[256]{};
     uint8_t reg_ptr_ = 0;
     const uint64_t* cycles_ = nullptr;
+    uint64_t last_ppg_update_ = 0;
+    double ppg_phase_ = 0.0;
+    uint32_t sample_count_ = 0;
+    static constexpr uint64_t PPG_UPDATE_INTERVAL = 64'000'000 / 25; // 25 Hz sample rate
 
 public:
     static constexpr uint8_t I2C_ADDR = 0x44;
@@ -88,7 +93,12 @@ public:
 
     void i2c_read(uint8_t* data, uint32_t len) override {
         read_count_++;
-        if (cycles_ && (regs_[0x01] & 0x80)) update_ppg();
+        // Update PPG at fixed 25 Hz rate — registers stay consistent between updates
+        if (cycles_ && (regs_[0x01] & 0x80) &&
+            (*cycles_ - last_ppg_update_ >= PPG_UPDATE_INTERVAL)) {
+            update_ppg();
+            last_ppg_update_ = *cycles_;
+        }
         for (uint32_t i = 0; i < len; i++)
             data[i] = regs_[(uint8_t)(reg_ptr_ + i)];
     }
@@ -103,21 +113,10 @@ private:
 
     void update_ppg() {
         double t = *cycles_ / 64e6;
-        constexpr double bpm = 72.0;
+        constexpr double bpm = 75.0;
         double phase = 2.0 * M_PI * (bpm / 60.0) * t;
 
-        // PPG waveform: systolic peak + diastolic bump
-        // Wider peaks (σ²=0.5) for reliable detection at 10 Hz sampling
-        double p = fmod(phase, 2*M_PI);
-        double systolic = exp(-0.5 * (p - 1.2) * (p - 1.2) / 0.5);
-        double diastolic = 0.35 * exp(-0.5 * (p - 2.5) * (p - 2.5) / 0.6);
-        double ppg_ac = systolic + diastolic;
-
-        // Noise: deterministic from cycle count, ~3% amplitude
-        uint32_t n = noise(*cycles_ / 640000); // changes every ~10ms
-        double jitter = ((int32_t)(n & 0xFFF) - 2048) / 2048.0;
-
-        double ppg = 20000.0 + 15000.0 * ppg_ac + 800.0 * jitter;
+        double ppg = 20000.0 + 25.0 * sin(phase);
         uint32_t v = (uint32_t)std::max(0.0, std::min(ppg, 262143.0));
 
         // Encode for InfiniTime's ReadHrs():
@@ -129,10 +128,10 @@ private:
 
         // ALS via ReadAls(): m=reg[0x08], h=reg[0x0D], l=reg[0x0E]
         //   value = (m<<3) | ((h&0x3F)<<11) | (l&0x07)
-        // Low constant (indoor, sensor on wrist) ≈ 100
-        regs_[0x08] = 0x0C;  // m: 0x0C << 3 = 96
-        regs_[0x0D] = 0x00;  // h: 0
-        regs_[0x0E] = 0x04;  // l: 4 → total ALS ≈ 100
+        // Very low (sensor pressed against skin) ≈ 2
+        regs_[0x08] = 0x00;  // m
+        regs_[0x0D] = 0x00;  // h
+        regs_[0x0E] = 0x02;  // l: 2
     }
 };
 

@@ -668,6 +668,9 @@ static int run_interactive(EmulatorContext& emu) {
                      emu.hrs.read_count_, emu.hrs.write_count_,
                      emu.hrs.reg(0x01));
             SDL_SetWindowTitle(window, title);
+            fprintf(stderr, "[DIAG] %.0fs HRS: rd=%u en=0x%02X\n",
+                    emu.cpu.cycles / 64e6,
+                    emu.hrs.read_count_, emu.hrs.reg(0x01));
         }
 
         // Render display

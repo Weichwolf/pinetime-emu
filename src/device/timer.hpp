@@ -160,6 +160,14 @@ class RTC : public Device {
 public:
     void set_nvic(NVIC* nvic, uint32_t irq) { nvic_ = nvic; irq_ = irq; }
 
+    // Diagnostics
+    bool diag_running() const { return running_; }
+    uint32_t diag_counter() const { return counter_; }
+    uint32_t diag_prescaler() const { return prescaler_; }
+    uint32_t diag_inten() const { return inten_; }
+    uint32_t diag_evten() const { return evten_; }
+    uint32_t diag_cc(int i) const { return cc_[i]; }
+
     uint32_t read(uint32_t addr, Width /*w*/) override {
         if (addr >= 0x140 && addr < 0x150) return ev_compare_[(addr - 0x140) / 4];
         if (addr >= 0x540 && addr < 0x550) return cc_[(addr - 0x540) / 4];
