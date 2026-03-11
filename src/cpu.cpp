@@ -38,15 +38,22 @@ uint32_t CPU::shift_c(uint32_t val, ShiftType type, uint8_t amount, bool& carry)
     if (amount == 0) { carry = flag_c(); return val; }
     switch (type) {
     case ShiftType::LSL:
+        if (amount == 32) { carry = val & 1; return 0; }
+        if (amount > 32) { carry = 0; return 0; }
         carry = (val >> (32 - amount)) & 1;
         return val << amount;
     case ShiftType::LSR:
+        if (amount == 32) { carry = val >> 31; return 0; }
+        if (amount > 32) { carry = 0; return 0; }
         carry = (val >> (amount - 1)) & 1;
         return val >> amount;
     case ShiftType::ASR:
+        if (amount >= 32) { carry = val >> 31; return carry ? 0xFFFFFFFF : 0; }
         carry = ((int32_t)val >> (amount - 1)) & 1;
         return (uint32_t)((int32_t)val >> amount);
     case ShiftType::ROR:
+        amount &= 31; // ROR by 32 = no-op with carry
+        if (amount == 0) { carry = val >> 31; return val; }
         carry = (val >> (amount - 1)) & 1;
         return (val >> amount) | (val << (32 - amount));
     }
@@ -106,6 +113,7 @@ void CPU::reset() {
     cycles = 0;
     halted = wfi = false;
     branch_taken_ = false;
+    exclusive_active_ = false;
 
     // Read initial SP and PC from vector table
     msp = bus_->read32(0x00000000) & ~3u;
@@ -123,7 +131,18 @@ void CPU::exception_entry(uint32_t exception_num) {
     // Determine stack to use
     bool use_psp = !in_handler_mode() && (control & 2);
     uint32_t frame_sp = use_psp ? psp : msp;
-    frame_sp -= 32; // 8 words
+
+    // FPU context stacking: if FPCA set, stack S0-S15 + FPSCR (eager save)
+    bool stack_fpu = (control & 4); // CONTROL.FPCA
+    if (stack_fpu) {
+        frame_sp -= 72; // 18 words (S0-S15 + FPSCR + reserved), 8-byte aligned to 72
+        for (int i = 0; i < 16; i++)
+            bus_->write32(frame_sp + i * 4, s[i]);
+        bus_->write32(frame_sp + 64, fpscr);
+        // word at +68 is reserved
+    }
+
+    frame_sp -= 32; // 8 words for basic frame
 
     // Push context: R0, R1, R2, R3, R12, LR, ReturnAddress, xPSR
     bus_->write32(frame_sp + 0,  r[0]);
@@ -140,12 +159,18 @@ void CPU::exception_entry(uint32_t exception_num) {
     else msp = frame_sp;
 
     // Set EXC_RETURN in LR (before changing mode)
+    // bit[4]: 0 = FPU context stacked, 1 = no FPU context
+    uint32_t exc_return_base;
     if (use_psp)
-        r[14] = 0xFFFFFFFD; // Thread mode, PSP
+        exc_return_base = 0xFFFFFFFD; // Thread mode, PSP
     else if (in_handler_mode())
-        r[14] = 0xFFFFFFF1; // Handler mode, MSP
+        exc_return_base = 0xFFFFFFF1; // Handler mode, MSP
     else
-        r[14] = 0xFFFFFFF9; // Thread mode, MSP
+        exc_return_base = 0xFFFFFFF9; // Thread mode, MSP
+    if (stack_fpu)
+        exc_return_base &= ~0x10u; // bit[4]=0: FPU context stacked
+    // (bit[4] is already 1 in all base values = no FPU context)
+    r[14] = exc_return_base;
 
     // Set active exception (IPSR is bits [8:0]) — now in handler mode
     xpsr = (xpsr & ~0x1FFu) | (exception_num & 0x1FF);
@@ -161,6 +186,9 @@ void CPU::exception_entry(uint32_t exception_num) {
     r[15] = vector & ~1u;
     branch_taken_ = true;
 
+    // Clear exclusive monitor on exception entry (ARM B1.5.11)
+    exclusive_active_ = false;
+
     // Mark external interrupt as active
     if (exception_num >= 16 && nvic_) {
         nvic_->set_active(exception_num - 16);
@@ -174,7 +202,7 @@ void CPU::exception_return(uint32_t exc_return) {
     bool return_to_psp = exc_return & 4;
     uint32_t frame_sp = return_to_psp ? psp : msp;
 
-    // Pop context
+    // Pop basic context
     r[0]  = bus_->read32(frame_sp + 0);
     r[1]  = bus_->read32(frame_sp + 4);
     r[2]  = bus_->read32(frame_sp + 8);
@@ -185,6 +213,16 @@ void CPU::exception_return(uint32_t exc_return) {
     uint32_t return_xpsr = bus_->read32(frame_sp + 28);
 
     frame_sp += 32;
+
+    // Restore FPU context if stacked (EXC_RETURN bit[4] = 0)
+    bool restore_fpu = !(exc_return & 0x10);
+    if (restore_fpu) {
+        for (int i = 0; i < 16; i++)
+            s[i] = bus_->read32(frame_sp + i * 4);
+        fpscr = bus_->read32(frame_sp + 64);
+        frame_sp += 72;
+    }
+
     if (return_to_psp) psp = frame_sp;
     else msp = frame_sp;
 
@@ -741,9 +779,14 @@ void CPU::exec_thumb16(uint16_t inst) {
     case 0b11011: {
         uint8_t cond = (inst >> 8) & 0xF;
         if (cond == 0xE) {
-            // UDF (permanently undefined)
-            fprintf(stderr, "[CPU] UDF at 0x%08X\n", r[15]);
-            halted = true;
+            // UDF (permanently undefined) → UsageFault UNDEFINSTR
+            if (nvic_) {
+                uint32_t exc = nvic_->raise_usage_fault(1); // UNDEFINSTR
+                exception_entry(exc);
+            } else {
+                fprintf(stderr, "[CPU] UDF at 0x%08X\n", r[15]);
+                halted = true;
+            }
         } else if (cond == 0xF) {
             // SVC — return address is the instruction AFTER SVC
             r[15] += 2;
@@ -1020,8 +1063,13 @@ void CPU::exec_thumb32_ldst_dual(uint16_t hw1, uint16_t hw2) {
         uint8_t rd = (hw2 >> 8) & 0xF; // Status
         uint32_t imm8 = (hw2 & 0xFF) << 2;
         uint32_t addr = read_reg(rn) + imm8;
-        bus_->write32(addr, read_reg(rt));
-        r[rd] = 0; // Always succeed (no multicore)
+        if (exclusive_active_ && exclusive_addr_ == (addr & ~3u)) {
+            bus_->write32(addr, read_reg(rt));
+            r[rd] = 0; // Success
+        } else {
+            r[rd] = 1; // Failure
+        }
+        exclusive_active_ = false;
         return;
     }
     if (op1 == 0 && op2_bits == 1) {
@@ -1031,6 +1079,8 @@ void CPU::exec_thumb32_ldst_dual(uint16_t hw1, uint16_t hw2) {
         uint32_t imm8 = (hw2 & 0xFF) << 2;
         uint32_t addr = read_reg(rn) + imm8;
         r[rt] = bus_->read32(addr);
+        exclusive_active_ = true;
+        exclusive_addr_ = addr & ~3u;
         return;
     }
 
@@ -1056,14 +1106,21 @@ void CPU::exec_thumb32_ldst_dual(uint16_t hw1, uint16_t hw2) {
         uint8_t op3 = (hw2 >> 4) & 0xF;
         uint8_t rn = hw1 & 0xF;
         uint8_t rt = (hw2 >> 12) & 0xF;
-        uint8_t rd = hw2 & 0xF;
         uint32_t addr = read_reg(rn);
         switch (op3) {
-        case 4: r[rt] = bus_->read8(addr); break;    // LDREXB
-        case 5: r[rt] = bus_->read16(addr); break;   // LDREXH
+        case 2: exclusive_active_ = false; break;     // CLREX
+        case 4: // LDREXB
+            r[rt] = bus_->read8(addr);
+            exclusive_active_ = true;
+            exclusive_addr_ = addr;
+            break;
+        case 5: // LDREXH
+            r[rt] = bus_->read16(addr);
+            exclusive_active_ = true;
+            exclusive_addr_ = addr & ~1u;
+            break;
         default: break;
         }
-        (void)rd;
         return;
     }
     if ((hw1 & 0xFFF0) == 0xE8C0) {
@@ -1073,8 +1130,18 @@ void CPU::exec_thumb32_ldst_dual(uint16_t hw1, uint16_t hw2) {
         uint8_t rd = hw2 & 0xF;
         uint32_t addr = read_reg(rn);
         switch (op3) {
-        case 4: bus_->write8(addr, read_reg(rt)); r[rd] = 0; break;  // STREXB
-        case 5: bus_->write16(addr, read_reg(rt)); r[rd] = 0; break; // STREXH
+        case 4: // STREXB
+            if (exclusive_active_ && exclusive_addr_ == addr) {
+                bus_->write8(addr, read_reg(rt)); r[rd] = 0;
+            } else { r[rd] = 1; }
+            exclusive_active_ = false;
+            break;
+        case 5: // STREXH
+            if (exclusive_active_ && exclusive_addr_ == (addr & ~1u)) {
+                bus_->write16(addr, read_reg(rt)); r[rd] = 0;
+            } else { r[rd] = 1; }
+            exclusive_active_ = false;
+            break;
         default: break;
         }
         return;
@@ -1450,7 +1517,7 @@ void CPU::exec_thumb32_misc_control(uint16_t hw1, uint16_t hw2) {
         case 19: faultmask = val & 1; irq_pending = true; break;
         case 20: {
             bool was_psp = !in_handler_mode() && (control & 2);
-            control = val & 3;
+            control = (control & 4) | (val & 3); // Preserve FPCA (bit 2)
             bool now_psp = !in_handler_mode() && (control & 2);
             if (was_psp != now_psp) r[13] = now_psp ? psp : msp;
             break;
@@ -1479,10 +1546,11 @@ void CPU::exec_thumb32_misc_control(uint16_t hw1, uint16_t hw2) {
     }
 
     // Hints and barriers: hw1[7:5] = 101 (or other)
+    // CLREX, DSB, DMB, ISB
+    uint8_t op_barrier = (hw2 >> 4) & 0xF;
+    if (op_barrier == 2) exclusive_active_ = false; // CLREX
     // DSB, DMB, ISB are NOPs for single-core emulation
     return;
-
-    fprintf(stderr, "[CPU] Unimpl misc control at 0x%08X: %04X %04X\n", r[15], hw1, hw2);
 }
 
 // ---- Load/Store Single ----
@@ -1739,6 +1807,7 @@ void CPU::exec_thumb32_long_multiply(uint16_t hw1, uint16_t hw2) {
 
 // VFP data processing (CDP/CDP2, MCR/MRC) — op1=11, op2 bit 6 set
 void CPU::exec_vfp(uint16_t hw1, uint16_t hw2) {
+    control |= 4; // CONTROL.FPCA = 1 (FPU was used)
     uint8_t opc1 = (hw1 >> 4) & 0xF;
     uint8_t cp = (hw2 >> 8) & 0xF;
 
@@ -1792,6 +1861,7 @@ void CPU::exec_vfp(uint16_t hw1, uint16_t hw2) {
 
 // VFP load/store and 64-bit transfers (op1=01, coprocessor)
 void CPU::exec_vfp_ldst(uint16_t hw1, uint16_t hw2) {
+    control |= 4; // CONTROL.FPCA = 1 (FPU was used)
     uint32_t inst = (hw1 << 16) | hw2;
     uint8_t cp = (hw2 >> 8) & 0xF;
 

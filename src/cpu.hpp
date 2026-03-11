@@ -45,6 +45,10 @@ public:
     bool breakpoint_hit = false;
     uint32_t prev_pc_ = 0;
 
+    // Exclusive monitor (LDREX/STREX)
+    bool exclusive_active_ = false;
+    uint32_t exclusive_addr_ = 0;
+
     // Simple breakpoint table (up to 16)
     static constexpr int MAX_BP = 16;
     uint32_t breakpoints[MAX_BP]{};

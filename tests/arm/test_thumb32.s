@@ -298,6 +298,54 @@ test12_back:
     cmp r6, #0x33
     bne fail35
 
+    @ Test 36: STREX without LDREX fails (exclusive monitor)
+    ldr r0, =0x20000300
+    movs r1, #77
+    str r1, [r0]           @ plain store, no LDREX
+    movs r3, #88
+    strex r4, r3, [r0]    @ should FAIL (r4 = 1)
+    cmp r4, #1
+    bne fail36
+    ldr r5, [r0]
+    cmp r5, #77            @ original value unchanged
+    bne fail36
+
+    @ Test 37: CLREX clears exclusive monitor
+    ldr r0, =0x20000300
+    movs r1, #50
+    str r1, [r0]
+    ldrex r2, [r0]         @ acquire exclusive
+    clrex                  @ clear it
+    movs r3, #60
+    strex r4, r3, [r0]    @ should FAIL
+    cmp r4, #1
+    bne fail37
+
+    @ Test 38: STREX to wrong address fails
+    ldr r0, =0x20000300
+    ldr r6, =0x20000310
+    movs r1, #10
+    str r1, [r0]
+    str r1, [r6]
+    ldrex r2, [r0]         @ exclusive on 0x300
+    movs r3, #20
+    strex r4, r3, [r6]    @ wrong addr → fail
+    cmp r4, #1
+    bne fail38
+
+    @ Test 39: Second LDREX/STREX pair works
+    ldr r0, =0x20000300
+    movs r1, #111
+    str r1, [r0]
+    ldrex r2, [r0]
+    movs r3, #222
+    strex r4, r3, [r0]    @ should succeed
+    cmp r4, #0
+    bne fail39
+    ldr r5, [r0]
+    cmp r5, #222
+    bne fail39
+
     @ All tests passed
     movs r0, #0
     bkpt #0
@@ -380,6 +428,14 @@ fail33: movs r0, #33
 fail34: movs r0, #34
     bkpt #0
 fail35: movs r0, #35
+    bkpt #0
+fail36: movs r0, #36
+    bkpt #0
+fail37: movs r0, #37
+    bkpt #0
+fail38: movs r0, #38
+    bkpt #0
+fail39: movs r0, #39
     bkpt #0
 
     .align 2
