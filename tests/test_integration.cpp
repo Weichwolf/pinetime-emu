@@ -196,6 +196,14 @@ void test_twim_read_hrs3300_ppg() {
     twim.set_bus(&bus);
     twim.attach(HRS3300::I2C_ADDR, &hrs);
 
+    // Enable sensor
+    bus.write8(0x20000000, 0x01);
+    bus.write8(0x20000001, 0xD0);
+    twim.write(0x588, Width::Word, HRS3300::I2C_ADDR);
+    twim.write(0x544, Width::Word, 0x20000000);
+    twim.write(0x548, Width::Word, 2);
+    twim.write(0x008, Width::Word, 1);
+
     // Write reg pointer 0x09
     bus.write8(0x20000000, 0x09);
     twim.write(0x588, Width::Word, HRS3300::I2C_ADDR);

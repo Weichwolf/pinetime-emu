@@ -93,6 +93,10 @@ void test_hrs_ppg_with_cycles() {
     uint64_t cycles = 64000000; // 1 second
     hrs.set_cycles(&cycles);
 
+    // Enable sensor
+    uint8_t enable[] = {0x01, 0xD0};
+    hrs.i2c_write(enable, 2);
+
     uint8_t reg = 0x09;
     hrs.i2c_write(&reg, 1);
     uint8_t data[7];
@@ -273,6 +277,9 @@ void test_hrs_als_values() {
     HRS3300 hrs;
     uint64_t cycles = 64000000ULL;
     hrs.set_cycles(&cycles);
+
+    uint8_t enable[] = {0x01, 0xD0};
+    hrs.i2c_write(enable, 2);
 
     // ALS registers: m=0x08, h=0x0D, l=0x0E
     uint8_t reg = 0x08;

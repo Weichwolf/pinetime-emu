@@ -2009,6 +2009,12 @@ void CPU::exec_vfp_dp(uint32_t inst) {
             sf(vd) = (opc3 & 1) ? a - b : a + b; return;
         case 0x8: // VDIV
             sf(vd) = a / b; return;
+        case 0x9: // VFNMA/VFNMS (VFPv4 fused)
+            result = (opc3 & 1) ? -(sf(vd) + a*b) : -(sf(vd) - a*b);
+            sf(vd) = result; return;
+        case 0xA: // VFMA/VFMS (VFPv4 fused)
+            result = (opc3 & 1) ? sf(vd) - a*b : sf(vd) + a*b;
+            sf(vd) = result; return;
         case 0xB: // Misc: VMOV, VABS, VNEG, VSQRT, VCMP, VCVT
             exec_vfp_misc_single(inst, vd, vm);
             return;
@@ -2028,6 +2034,8 @@ void CPU::exec_vfp_dp(uint32_t inst) {
         case 0x2: set_df(vd, a*b); return;
         case 0x3: set_df(vd, (opc3&1) ? a-b : a+b); return;
         case 0x8: set_df(vd, a/b); return;
+        case 0x9: set_df(vd, (opc3&1) ? -(df(vd)+a*b) : -(df(vd)-a*b)); return;
+        case 0xA: set_df(vd, (opc3&1) ? df(vd)-a*b : df(vd)+a*b); return;
         case 0xB: exec_vfp_misc_double(inst, vd, vm_idx); return;
         }
     }
