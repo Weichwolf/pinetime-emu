@@ -381,35 +381,28 @@ static int run_headless(EmulatorContext& emu, uint32_t timeout_ms, bool trace) {
     int snap_idx = 0;
     uint64_t next_snap = start + 64'000'000;
 
-    uint64_t diag_iter = 0;
     while (emu.cpu.cycles - start < max_cycles && !emu.cpu.halted) {
-        if (++diag_iter == 500000) {
-            fprintf(stderr, "[DIAG] cy=%.2fM PC=0x%08X wfi=%d\n",
-                    emu.cpu.cycles/1e6, emu.cpu.r[15], emu.cpu.wfi);
-            for (int di = 0; di < emu.num_tickable_; di++) {
-                uint64_t ev = emu.tickable_[di]->next_event(emu.cpu.cycles);
-                if (ev < emu.cpu.cycles + 1000000)
-                    fprintf(stderr, "  [%d] next_event=%lu (delta=%ld)\n",
-                            di, (unsigned long)ev, (long)(ev - emu.cpu.cycles));
-            }
-        }
         uint64_t next_ev = emu.next_peripheral_event();
-        uint64_t limit = emu.cpu.cycles + 10000; // Max batch for responsiveness
+
+        if (emu.cpu.wfi) {
+            uint64_t wake_at = std::min(next_ev, start + max_cycles);
+            if (wake_at <= emu.cpu.cycles) wake_at = emu.cpu.cycles + 1;
+            emu.cpu.cycles = wake_at;
+            emu.tick_peripherals();
+            emu.cpu.check_exceptions();
+            if (emu.cpu.event_reg) emu.cpu.wfi = false;
+            emu.ble_hci.poll(emu.cpu.cycles);
+            continue;
+        }
+
+        uint64_t limit = emu.cpu.cycles + 10000;
         uint64_t target = std::min({next_ev, limit, start + max_cycles});
         if (target <= emu.cpu.cycles) target = emu.cpu.cycles + 1;
 
         emu.cpu.yield_at = next_ev;
-        if (emu.cpu.wfi) {
-            emu.cpu.cycles = target;
-            emu.tick_peripherals();
-            emu.cpu.check_exceptions();
-            // Wake from WFE if event_reg was set by peripheral tick
-            if (emu.cpu.event_reg) emu.cpu.wfi = false;
-        } else {
-            emu.cpu.run(target);
-            emu.tick_peripherals();
-            emu.cpu.check_exceptions();
-        }
+        emu.cpu.run(target);
+        emu.tick_peripherals();
+        emu.cpu.check_exceptions();
         emu.ble_hci.poll(emu.cpu.cycles);
 
         if (emu.cpu.breakpoint_hit) {
@@ -709,21 +702,27 @@ static int run_interactive(EmulatorContext& emu) {
         uint64_t frame_target = emu.cpu.cycles + CYCLES_PER_FRAME;
         while (emu.cpu.cycles < frame_target && !emu.cpu.halted) {
             uint64_t next_ev = emu.next_peripheral_event();
+
+            if (emu.cpu.wfi) {
+                // WFI: skip time to next peripheral event (or frame end)
+                uint64_t wake_at = std::min(next_ev, frame_target);
+                if (wake_at <= emu.cpu.cycles) wake_at = emu.cpu.cycles + 1;
+                emu.cpu.cycles = wake_at;
+                emu.tick_peripherals();
+                emu.cpu.check_exceptions();
+                if (emu.cpu.event_reg) emu.cpu.wfi = false;
+                emu.ble_hci.poll(emu.cpu.cycles);
+                continue;
+            }
+
             uint64_t limit = emu.cpu.cycles + 10000;
             uint64_t batch = std::min({next_ev, limit, frame_target});
             if (batch <= emu.cpu.cycles) batch = emu.cpu.cycles + 1;
 
             emu.cpu.yield_at = next_ev;
-            if (emu.cpu.wfi) {
-                emu.cpu.cycles = batch;
-                emu.tick_peripherals();
-                emu.cpu.check_exceptions();
-                if (emu.cpu.event_reg) emu.cpu.wfi = false;
-            } else {
-                emu.cpu.run(batch);
-                emu.tick_peripherals();
-                emu.cpu.check_exceptions();
-            }
+            emu.cpu.run(batch);
+            emu.tick_peripherals();
+            emu.cpu.check_exceptions();
             emu.ble_hci.poll(emu.cpu.cycles);
         }
 
