@@ -243,7 +243,7 @@ Ziel: BLE-Kommunikation mit externem Host-Stack (Gadgetbridge, Bumble, BlueZ).
 - ✓ CTS (0x1805): System-Uhrzeit synchronisieren (CTS Current Time Format)
 - ✓ ANS (0x1811): Notification "Emulator ready" (New Alert)
 - ✓ Music Service (InfiniTime custom UUID): Track/Artist/Album/Status
-- ✓ Weather Service (InfiniTime custom UUID): 21.5°C, Few Clouds, Berlin
+- — Weather Service: SimpleWeatherService (sid=0x0004) nicht im Firmware-Build enthalten
 - ✓ Device-initiated MTU Request Handling (deferred svc discovery start)
 - ✓ 42 Unit-Tests (State Machine, Full Flow, Partial Services, Time Format)
 - ✓ Vollständige NimBLE-Integration: S1-Byte-Handling (PCNF0 S1INCL), SN/NESN-Tracking, Master-TX-Injection für Data Channel, proaktiver ATT-Start nach LL-Procedures

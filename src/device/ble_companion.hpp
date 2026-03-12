@@ -153,7 +153,8 @@ private:
                 }
             }
         }
-        if (last_end < 0xFFFF) build_svc_disc_req(last_end + 1, 0xFFFF);
+        disc_next_ = last_end < 0xFFFF ? last_end + 1 : 0xFFFF;
+        if (last_end < 0xFFFF) build_svc_disc_req(disc_next_, 0xFFFF);
         else finish_svc_discovery();
     }
 
