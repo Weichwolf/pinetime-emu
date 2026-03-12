@@ -92,11 +92,13 @@ class BleHci {
     // Data channel sequence numbers
     uint8_t our_sn_ = 0;    // Our SN for outgoing PDUs
     uint8_t our_nesn_ = 0;  // Our NESN (next expected from peer)
+    uint32_t data_evt_count_ = 0; // Connection event counter
 
     // Companion mode
     BleCompanion companion_;
     bool companion_mode_ = false;
     bool companion_started_ = false;
+    bool pending_master_tx_ = false;  // Prevents double-inject per RX window
 
     // I/O buffers
     std::vector<uint8_t> tx_buf_;
@@ -144,7 +146,36 @@ public:
         poll_tcp();
 
         // Check for pending RX injection into Radio
-        if (radio_) radio_->check_pending_rx();
+        if (radio_) {
+            radio_->check_pending_rx();
+
+            // Master role: if connected and radio is in RX on a data channel,
+            // proactively send a data PDU (empty ACK or pending ATT data).
+            // BLE: master transmits first at each connection event.
+            if (connected_ && radio_->get_state() == 3 /* RX */) {
+                uint8_t ch = radio_->get_frequency();
+                // Data channels: frequency register = channel*2 + 2 (ch 0-36)
+                // Advertising: ch37→freq=2, ch38→freq=26, ch39→freq=80
+                // A better check: datawhiteiv tells us the channel number
+                // But simplest: if no pending RX, inject master TX
+                bool is_data = !pending_master_tx_;
+                uint32_t dwiv = radio_->get_datawhiteiv();
+                if (dwiv < 37 && !pending_master_tx_) {
+                    pending_master_tx_ = true;
+                    if (companion_mode_ && companion_started_ && companion_.has_pending()) {
+                        send_att_to_device();
+                    } else {
+                        // Empty PDU from master (LLID=01, len=0)
+                        uint8_t empty[2];
+                        empty[0] = 0x01 | (our_nesn_ << 2) | (our_sn_ << 3);
+                        empty[1] = 0;
+                        radio_->queue_rx(empty, 2);
+                    }
+                }
+            } else {
+                pending_master_tx_ = false;
+            }
+        }
 
         // Send advertising reports while scanning
         if (scanning_ && last_adv_.valid) {
@@ -181,7 +212,6 @@ private:
 
     void on_radio_tx(const uint8_t* pdu, size_t len, uint8_t channel) {
         if (len < 2) return;
-
         bool is_adv_channel = (channel == 37 || channel == 38 || channel == 39);
 
         if (is_adv_channel) {
@@ -241,16 +271,24 @@ private:
         uint8_t pdu_len = pdu[1];
         uint8_t llid = header & 0x03;
         uint8_t sn = (header >> 3) & 1;
+        bool response_queued = false;
+        uint8_t nesn = (header >> 2) & 1;
+        data_evt_count_++;
 
-        // Acknowledge: update our NESN
+        // Check if slave ACKed our last TX (NESN advanced)
+        if (nesn != our_sn_) {
+            our_sn_ ^= 1;
+        }
+
+        // Accept new data from slave (SN matches our expected)
         if (sn == our_nesn_) {
             our_nesn_ ^= 1;
 
             if (llid == 0x03 && pdu_len >= 1) {
                 handle_ll_control(pdu + 2, pdu_len);
+                response_queued = true; // LL control handler queues its own response
             } else if ((llid == 0x01 || llid == 0x02) && pdu_len > 0) {
                 if (companion_mode_) {
-                    // Route L2CAP to companion: strip L2CAP header (len(2)+CID(2)) → ATT
                     const uint8_t* l2cap = pdu + 2;
                     if (pdu_len >= 4) {
                         uint16_t l2cap_len = l2cap[0] | (l2cap[1] << 8);
@@ -269,8 +307,15 @@ private:
             }
         }
 
-        // Send response: companion data or empty ACK
-        if (radio_) {
+        // Start companion after LL procedures complete (~4 connection events)
+        if (companion_mode_ && !companion_started_ && data_evt_count_ >= 4 && !response_queued) {
+            companion_started_ = true;
+            companion_.on_connected();
+            fprintf(stderr, "[Companion] Starting ATT exchange (after %u data events)\n", data_evt_count_);
+        }
+
+        // Send response if LL control didn't already queue one
+        if (radio_ && !response_queued) {
             if (companion_mode_ && companion_started_ && companion_.has_pending()) {
                 send_att_to_device();
             } else {
@@ -294,7 +339,7 @@ private:
         pdu[2] = att_len; pdu[3] = att_len >> 8; // L2CAP length
         pdu[4] = 0x04; pdu[5] = 0x00; // CID = 0x0004 (ATT)
         memcpy(pdu + 6, att, att_len);
-        our_sn_ ^= 1;
+        // SN advances only when slave ACKs (in on_data_tx), not here
         radio_->queue_rx(pdu, 6 + att_len);
     }
 
@@ -354,7 +399,7 @@ private:
         pdu[1] = 1 + len; // opcode + data
         pdu[2] = ll_opcode;
         if (len) memcpy(pdu + 3, data, len);
-        our_sn_ ^= 1;
+        // SN advances only when slave ACKs (in on_data_tx), not here
         radio_->queue_rx(pdu, 3 + len);
     }
 
@@ -675,7 +720,7 @@ private:
         pdu[0] = 0x02 | (our_nesn_ << 2) | (our_sn_ << 3); // LLID=10 (L2CAP start), NESN, SN
         pdu[1] = acl_len;
         memcpy(pdu + 2, l2cap, acl_len);
-        our_sn_ ^= 1;
+        // SN advances only when slave ACKs, not here
         radio_->queue_rx(pdu, 2 + acl_len);
 
         // Send Num Completed Packets

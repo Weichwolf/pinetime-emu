@@ -127,7 +127,14 @@ void CPU::reset() {
 // Exception handling
 // ============================================================================
 
+static int pendsv_trace_ = 0;
 void CPU::exception_entry(uint32_t exception_num) {
+    if (exception_num < irq_dispatch_count.size()) irq_dispatch_count[exception_num]++;
+    if (exception_num == 14 && pendsv_trace_++ < 3) {
+        bool use_psp_t = !in_handler_mode() && (control & 2);
+        fprintf(stderr, "[PendSV] entry: r15=0x%08X psp=0x%08X use_psp=%d handler=%d ctrl=%u\n",
+            r[15], psp, use_psp_t, in_handler_mode(), control);
+    }
     // Determine stack to use
     bool use_psp = !in_handler_mode() && (control & 2);
     uint32_t frame_sp = use_psp ? psp : msp;
@@ -307,10 +314,20 @@ void CPU::check_exceptions() {
     if (irq >= 0) {
         int pri = nvic_->priority(irq);
         if (pri < exec_pri && pri < effective_basepri) {
+            if (irq == 1) {
+                static int radio_dispatch_ = 0;
+                if (radio_dispatch_++ < 20)
+                    fprintf(stderr, "[NVIC] IRQ1 DISPATCH: pri=%d PC=0x%08X cy=%lu\n",
+                            pri, r[15], (unsigned long)cycles);
+            }
             exception_entry(irq + 16);
             wfi = false;
             return;
         }
+        static int radio_block_trace_ = 0;
+        if (irq == 1 && radio_block_trace_++ < 20)
+            fprintf(stderr, "[NVIC] IRQ1 BLOCKED: pri=%d basepri=%d primask=%u exec_pri=%d PC=0x%08X cy=%lu\n",
+                    pri, effective_basepri, primask, exec_pri, r[15], (unsigned long)cycles);
     }
 }
 
@@ -441,7 +458,7 @@ inline void CPU::exec_dispatch(OpClass op, uint16_t hw1, uint16_t hw2) {
 
 void CPU::run(uint64_t target_cycles) {
     // Outer loop: handles interrupts, sysreset, breakpoints
-    while (cycles < target_cycles && !halted) {
+    while (cycles < target_cycles && cycles < yield_at && !halted) {
         if (__builtin_expect(nvic_ && nvic_->check_sysreset(), 0)) {
             fprintf(stderr, "[CPU] SYSRESETREQ at PC=0x%08X cy=%llu\n",
                     r[15], (unsigned long long)cycles);
@@ -456,7 +473,7 @@ void CPU::run(uint64_t target_cycles) {
 
         // Inner loop: block-chained execution in flash
         if (__builtin_expect(flash_ != nullptr && decode_cache_ != nullptr, 1)) {
-            while (cycles < target_cycles && !halted && !irq_pending && !wfi) {
+            while (cycles < target_cycles && cycles < yield_at && !halted && !irq_pending && !wfi) {
                 uint32_t pc = r[15];
                 if (__builtin_expect(pc + 3 >= flash_size_, 0)) { step(); break; }
 

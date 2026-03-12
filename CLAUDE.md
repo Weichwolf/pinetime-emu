@@ -149,9 +149,18 @@ Tests terminieren via BKPT. R0=0 = PASS, R0=N = Test N fehlgeschlagen.
 **PineTime**: ST7789 (SPI→Framebuffer→SDL2), CST816S Touch (WASD=Swipe, Maus=Tap, Space=Button), HRS3300 (PPG, 75 BPM), BMA4xx (Step Counter). Ext. SPI NOR Flash 4MB (MX25L).
 **Firmware**: `firmware/merged-internal.bin` — InfiniTime 1.14.1 + MCUBoot Bootloader.
 
-**InfiniTime Boot**: ✓ Erfolgreich. MCUBoot → InfiniTime Handoff, Display ON, Digital Watchface gerendert (8k/58k Pixel), FreeRTOS stabil (10s Laufzeit, Scheduler aktiv, Tasks laufen).
+**InfiniTime Boot**: ✓ Erfolgreich. MCUBoot → InfiniTime Handoff, Display ON, Digital Watchface gerendert, FreeRTOS stabil (12s Laufzeit, Scheduler aktiv, Tasks laufen).
 
 **Touch/Gesture Input**: ✓ Funktioniert. WASD für Swipe-Gesten (W=Up, S=Down, A=Left, D=Right), Maus für Tap, Space für Button. Touch-IRQ-Kette: CST816S → GPIO Pin 28 (active low) → GPIOTE PORT Event → NVIC IRQ 6 → FreeRTOS Task Notification → Gesture Processing → Display Update.
+
+**BLE Companion** (`--companion`): ✓ Funktioniert. Auto-Connect → LL Procedures (FEATURE_REQ, LENGTH_REQ) → ATT MTU Exchange → Service Discovery (CTS, Music, ANS) → Time Sync + Music + Notification Writes. Vollständige NimBLE-Interaktion über RADIO-Emulation (kein SoftDevice-Bypass).
+
+**Kritische BLE-Fixes**:
+- RADIO PCNF0 S1-Byte: S1INCL=1 mit S1LEN=0 erzeugt 1-Byte S1-Feld im RAM (PACKETPTR+2). inject_rx/capture_tx müssen S1-Offset beachten, sonst AdvA-Mismatch.
+- Master-TX-Injection: BLE Peripheral erwartet Master-TX zuerst bei Connection Events. Companion muss proaktiv leere PDUs (oder ATT-Daten) injizieren wenn Radio in RX auf Data Channel.
+- SN/NESN-Tracking: SN darf nur toggled werden wenn Slave ACKt (NESN != SN). Nicht beim Senden — sonst Retransmission-Deadlock.
+- LL Control Response Overwrite: handle_ll_control queued Response, danach überschrieb empty ACK. Fix: response_queued Flag.
+- Proaktiver ATT-Start: Companion startet MTU Exchange nach 4 Connection Events (wenn LL Procedures abgeschlossen), statt auf Device-ATT zu warten.
 
 **Kritische Emulations-Fixes**:
 - GPIO SENSE/DETECT: PORT event feuert auf DETECT Rising Edge (nicht auf jede Pin-Änderung). DETECT = OR aller Pins wo SENSE-Condition matched. Auto-Toggle: PIN_CNF Read toggled SENSE intern wenn Condition matched (InfiniTime's nrfx_gpiote toggled SENSE nicht selbst). Firmware die SENSE explizit schreibt: Write überschreibt Auto-Toggle.
@@ -237,7 +246,7 @@ Ziel: BLE-Kommunikation mit externem Host-Stack (Gadgetbridge, Bumble, BlueZ).
 - ✓ Weather Service (InfiniTime custom UUID): 21.5°C, Few Clouds, Berlin
 - ✓ Device-initiated MTU Request Handling (deferred svc discovery start)
 - ✓ 42 Unit-Tests (State Machine, Full Flow, Partial Services, Time Format)
-- Offen: Benötigt SoftDevice BLE Advertising (Radio-Emulation noch nicht vollständig)
+- ✓ Vollständige NimBLE-Integration: S1-Byte-Handling (PCNF0 S1INCL), SN/NESN-Tracking, Master-TX-Injection für Data Channel, proaktiver ATT-Start nach LL-Procedures
 
 ### Bestandsaufnahme (was steht, was nicht)
 | Komponente | Status | Produktiv-tauglich? |

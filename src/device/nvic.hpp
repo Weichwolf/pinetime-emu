@@ -154,6 +154,7 @@ public:
     void set_sys_pending(uint32_t exc) { if (exc >= 2 && exc <= 15) { sys_pending_ |= (1u << exc); signal_irq(); } }
     void clear_sys_pending(uint32_t exc) { if (exc >= 2 && exc <= 15) sys_pending_ &= ~(1u << exc); }
     bool is_sys_pending(uint32_t exc) const { return exc >= 2 && exc <= 15 && (sys_pending_ & (1u << exc)); }
+    bool any_sys_pending() const { return sys_pending_ != 0; }
 
     // Fault helpers — returns exception number to take (4=MemManage, 5=BusFault, 6=UsageFault, 3=HardFault)
     uint32_t raise_usage_fault(uint16_t ufsr_bits) {
@@ -278,10 +279,30 @@ private:
     }
 
     void write_nvic(uint32_t off, uint32_t val) {
-        if (off < 0x020) { iser_[off / 4] |= val; return; }                         // ISER: set bits
-        if (off >= 0x080 && off < 0x0A0) { iser_[(off-0x080)/4] &= ~val; return; }  // ICER: clear bits
-        if (off >= 0x100 && off < 0x120) { ispr_[(off-0x100)/4] |= val; signal_irq(); return; }   // ISPR: set pending
-        if (off >= 0x180 && off < 0x1A0) { ispr_[(off-0x180)/4] &= ~val; return; }  // ICPR: clear pending
+        if (off < 0x020) {
+            if (off == 0 && (val & 0x03000000))  // IRQ24/25 (SWI4/5)
+                fprintf(stderr, "[NVIC] ISER0 |= 0x%08X → 0x%08X (SWI4/5!)\n", val, iser_[0] | val);
+            iser_[off / 4] |= val; return;
+        }
+        if (off >= 0x080 && off < 0x0A0) {
+            if (off == 0x080 && (val & 0x03000000))
+                fprintf(stderr, "[NVIC] ICER0 &= ~0x%08X → 0x%08X (SWI4/5!)\n", val, iser_[0] & ~val);
+            iser_[(off-0x080)/4] &= ~val; return;
+        }
+        if (off >= 0x100 && off < 0x120) {
+            if (off == 0x100 && (val & 0x03000000))
+                fprintf(stderr, "[NVIC] ISPR0 |= 0x%08X (SWI4/5 pending!) ISER0=0x%08X\n", val, iser_[0]);
+            ispr_[(off-0x100)/4] |= val; signal_irq(); return;
+        }
+        if (off >= 0x180 && off < 0x1A0) {
+            if (off == 0x180 && (val & 2) && (ispr_[0] & 2)) {
+                static int icpr_radio_ = 0;
+                if (icpr_radio_++ < 10)
+                    fprintf(stderr, "[NVIC] ICPR0 clearing RADIO (bit1) WHILE SET: val=0x%08X ispr=0x%08X PC=0x%08X\n",
+                            val, ispr_[0], 0); // PC not accessible here
+            }
+            ispr_[(off-0x180)/4] &= ~val; return;
+        }  // ICPR: clear pending
         if (off >= 0x300 && off < 0x3F0) {                                           // IPR
             uint32_t idx = off - 0x300;
             if (idx + 3 < 240) {

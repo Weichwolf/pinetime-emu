@@ -179,6 +179,8 @@ struct EmulatorContext {
         bus.map(0x4000D000, 0x1000, &rng);         // RNG
         radio.set_nvic(&nvic, 1);
         radio.set_bus(&bus);
+        radio.set_ppi(&ppi);
+        radio.set_cycles(&cpu.cycles, &cpu.event_reg);
         ble_hci.set_bus(&bus);
         ble_hci.set_radio(&radio);
         uarte0.set_bus(&bus);
@@ -232,7 +234,7 @@ struct EmulatorContext {
         nvic.set_cpu_pc(&cpu.r[15]);
         bus.cpu_pc_ = &cpu.r[15];
         bus.cpu_cy_ = &cpu.cycles;
-        bus.watch_addr_ = 0;  // No watchpoint
+        bus.watch_addr_ = 0x2000F187;  // Watch phy_transition in g_ble_phy_data
         dwt.set_cpu(&cpu);
         flash.set_on_write([this](uint32_t addr, uint32_t len) {
             cpu.invalidate_cache(addr, len);
@@ -241,12 +243,19 @@ struct EmulatorContext {
 
         // Wire peripherals to NVIC (nRF52 IRQ numbers)
         clock_power.set_nvic(&nvic, 0);
-        timer0.set_nvic(&nvic, 8);
-        timer1.set_nvic(&nvic, 9);
-        timer2.set_nvic(&nvic, 10);
+        clock_power.set_ppi(&ppi);
+        timer0.set_nvic(&nvic, 8); timer0.set_cycles(&cpu.cycles, &cpu.r[15]);
+        timer0.set_ppi(&ppi, 0x40008000);
+        timer1.set_nvic(&nvic, 9); timer1.set_cycles(&cpu.cycles, &cpu.r[15]);
+        timer1.set_ppi(&ppi, 0x40009000);
+        timer2.set_nvic(&nvic, 10); timer2.set_cycles(&cpu.cycles, &cpu.r[15]);
+        timer2.set_ppi(&ppi, 0x4000A000);
         rtc0.set_nvic(&nvic, 11);
+        rtc0.set_ppi(&ppi, 0x4000B000);
         rtc1.set_nvic(&nvic, 17);
+        rtc1.set_ppi(&ppi, 0x40011000);
         rtc2.set_nvic(&nvic, 36);
+        rtc2.set_ppi(&ppi, 0x40024000);
 
         // Wire SPIM/TWIM to bus (for DMA) and NVIC
         spim0.set_bus(&bus);
@@ -320,6 +329,7 @@ struct EmulatorContext {
         tickable_[num_tickable_++] = &rng;
         tickable_[num_tickable_++] = &temp;
         tickable_[num_tickable_++] = &ppi;
+        tickable_[num_tickable_++] = &radio;
         tickable_[num_tickable_++] = &wdt;
     }
 
@@ -371,16 +381,30 @@ static int run_headless(EmulatorContext& emu, uint32_t timeout_ms, bool trace) {
     int snap_idx = 0;
     uint64_t next_snap = start + 64'000'000;
 
+    uint64_t diag_iter = 0;
     while (emu.cpu.cycles - start < max_cycles && !emu.cpu.halted) {
+        if (++diag_iter == 500000) {
+            fprintf(stderr, "[DIAG] cy=%.2fM PC=0x%08X wfi=%d\n",
+                    emu.cpu.cycles/1e6, emu.cpu.r[15], emu.cpu.wfi);
+            for (int di = 0; di < emu.num_tickable_; di++) {
+                uint64_t ev = emu.tickable_[di]->next_event(emu.cpu.cycles);
+                if (ev < emu.cpu.cycles + 1000000)
+                    fprintf(stderr, "  [%d] next_event=%lu (delta=%ld)\n",
+                            di, (unsigned long)ev, (long)(ev - emu.cpu.cycles));
+            }
+        }
         uint64_t next_ev = emu.next_peripheral_event();
         uint64_t limit = emu.cpu.cycles + 10000; // Max batch for responsiveness
         uint64_t target = std::min({next_ev, limit, start + max_cycles});
         if (target <= emu.cpu.cycles) target = emu.cpu.cycles + 1;
 
+        emu.cpu.yield_at = next_ev;
         if (emu.cpu.wfi) {
             emu.cpu.cycles = target;
             emu.tick_peripherals();
             emu.cpu.check_exceptions();
+            // Wake from WFE if event_reg was set by peripheral tick
+            if (emu.cpu.event_reg) emu.cpu.wfi = false;
         } else {
             emu.cpu.run(target);
             emu.tick_peripherals();
@@ -518,8 +542,9 @@ static int run_headless(EmulatorContext& emu, uint32_t timeout_ms, bool trace) {
         uint32_t saved_pc = emu.bus.read32(sp + 15*4);
         uint32_t saved_lr = emu.bus.read32(sp + 14*4);
         uint32_t saved_xpsr = emu.bus.read32(sp + 16*4);
-        fprintf(stderr, "  TCB@0x%08X sp=0x%08X pc=0x%08X lr=0x%08X xpsr=0x%08X exc=0x%08X name=\"%s\"\n",
-                addr, sp, saved_pc, saved_lr, saved_xpsr, exc_ret, name);
+        uint32_t priority = emu.bus.read32(addr + 44);
+        fprintf(stderr, "  TCB@0x%08X sp=0x%08X pc=0x%08X exc=0x%08X prio=%u name=\"%s\"\n",
+                addr, sp, saved_pc, exc_ret, priority, name);
         // Dump MAI stack for call chain analysis
         if (name[0] == 'M' && name[1] == 'A' && name[2] == 'I') {
             fprintf(stderr, "  [MAI stack dump from SP=0x%08X, 64 words]\n", sp);
@@ -539,6 +564,23 @@ static int run_headless(EmulatorContext& emu, uint32_t timeout_ms, bool trace) {
     fprintf(stderr, "[VTOR] IRQ0=0x%08X IRQ1=0x%08X IRQ3=0x%08X IRQ17=0x%08X\n",
             emu.bus.read32(vtor + 16*4), emu.bus.read32(vtor + 17*4),
             emu.bus.read32(vtor + 19*4), emu.bus.read32(vtor + 33*4));
+    fprintf(stderr, "[VTOR] IRQ11(RTC0)=0x%08X IRQ24(SWI4)=0x%08X IRQ25(SWI5)=0x%08X\n",
+            emu.bus.read32(vtor + (16+11)*4), emu.bus.read32(vtor + (16+24)*4), emu.bus.read32(vtor + (16+25)*4));
+    // NVIC ISER0 (enable) at 0xE000E100, ISPR0 (pending) at 0xE000E200
+    fprintf(stderr, "[NVIC] ISER0=0x%08X ISPR0=0x%08X\n",
+            emu.bus.read32(0xE000E100), emu.bus.read32(0xE000E200));
+    // IRQ dispatch counts
+    fprintf(stderr, "[IRQ dispatch]");
+    for (int i = 0; i < 48; i++)
+        if (emu.cpu.irq_dispatch_count[i] > 0)
+            fprintf(stderr, " %d:%u", i, emu.cpu.irq_dispatch_count[i]);
+    fprintf(stderr, "\n");
+    // RADIO ISR trampoline target + phy_transition
+    fprintf(stderr, "[RADIO ISR] trampoline@0x2000A3F8 → 0x%08X\n",
+            emu.bus.read32(0x2000A3F8));
+    fprintf(stderr, "[BLE PHY] g_ble_phy_data@0x2000F184: transition=%u state=%u disabled_cb=0x%08X\n",
+            emu.bus.read8(0x2000F187), emu.bus.read8(0x2000F186),
+            emu.bus.read32(0x2000F1B0));
     // PPI channel dump
     fprintf(stderr, "[PPI] CHEN=0x%08X\n", emu.bus.read32(0x4001F500));
     for (int i = 0; i < 20; i++) {
@@ -547,6 +589,8 @@ static int run_headless(EmulatorContext& emu, uint32_t timeout_ms, bool trace) {
         if (eep || tep) fprintf(stderr, "  CH[%d]: EEP=0x%08X TEP=0x%08X\n", i, eep, tep);
     }
     // Radio state
+    fprintf(stderr, "[CLOCK] HFCLKSTARTED=%u HFCLKRUN=%u LFCLKSTARTED=%u\n",
+            emu.bus.read32(0x40000100), emu.bus.read32(0x40000104), emu.bus.read32(0x40000108));
     fprintf(stderr, "[Radio] state=%u shorts=0x%08X inten=0x%08X\n",
             emu.bus.read32(0x40001550), emu.bus.read32(0x40001200), emu.bus.read32(0x40001300));
     fprintf(stderr, "[Radio] ev: ready=%u addr=%u payload=%u end=%u disabled=%u\n",
@@ -554,13 +598,24 @@ static int run_headless(EmulatorContext& emu, uint32_t timeout_ms, bool trace) {
             emu.bus.read32(0x40001108), emu.bus.read32(0x4000110C),
             emu.bus.read32(0x40001110));
     // TIMER0 state
-    fprintf(stderr, "[TIMER0] CC[0]=%u CC[1]=%u CC[2]=%u shorts=0x%08X inten=0x%08X\n",
+    fprintf(stderr, "[TIMER0] mode=%u bitmode=%u prescaler=%u CC[0]=%u CC[1]=%u CC[2]=%u shorts=0x%08X inten=0x%08X\n",
+            emu.bus.read32(0x40008504), emu.bus.read32(0x40008508),
+            emu.bus.read32(0x40008510),
             emu.bus.read32(0x40008540), emu.bus.read32(0x40008544),
             emu.bus.read32(0x40008548), emu.bus.read32(0x40008200),
             emu.bus.read32(0x40008300));
-    fprintf(stderr, "[TIMER0] ev_cmp: [0]=%u [1]=%u [2]=%u [3]=%u\n",
+    fprintf(stderr, "[TIMER0] running=%d counter=%u starts=%u stops=%u fires=%u ev_cmp: [0]=%u [1]=%u [2]=%u [3]=%u\n",
+            emu.timer0.is_running(), emu.timer0.counter(),
+            emu.timer0.start_count_, emu.timer0.stop_count_, emu.timer0.tick_fires_,
             emu.bus.read32(0x40008140), emu.bus.read32(0x40008144),
             emu.bus.read32(0x40008148), emu.bus.read32(0x4000814C));
+    fprintf(stderr, "[RTC0] running=%d counter=%u prescaler=%u inten=0x%08X evten=0x%08X irq_fires=%u CC: %u %u %u %u\n",
+            emu.rtc0.diag_running(), emu.rtc0.diag_counter(), emu.rtc0.diag_prescaler(),
+            emu.rtc0.diag_inten(), emu.rtc0.diag_evten(), emu.rtc0.irq_fire_count_,
+            emu.rtc0.diag_cc(0), emu.rtc0.diag_cc(1), emu.rtc0.diag_cc(2), emu.rtc0.diag_cc(3));
+    fprintf(stderr, "[RADIO] txen=%u rxen=%u state=%u inten=0x%08X shorts=0x%X\n",
+            emu.radio.txen_count(), emu.radio.rxen_count(),
+            emu.radio.get_state(), emu.bus.read32(0x40001300), emu.bus.read32(0x40001200));
     // Read literal at 0x35ba0 (uxTopReadyPriority address) and 0x35ba4 (pxReadyTasksLists address)
     uint32_t addr_topready = emu.bus.read32(0x35ba0);
     uint32_t addr_readylists = emu.bus.read32(0x35ba4);
@@ -658,10 +713,12 @@ static int run_interactive(EmulatorContext& emu) {
             uint64_t batch = std::min({next_ev, limit, frame_target});
             if (batch <= emu.cpu.cycles) batch = emu.cpu.cycles + 1;
 
+            emu.cpu.yield_at = next_ev;
             if (emu.cpu.wfi) {
                 emu.cpu.cycles = batch;
                 emu.tick_peripherals();
                 emu.cpu.check_exceptions();
+                if (emu.cpu.event_reg) emu.cpu.wfi = false;
             } else {
                 emu.cpu.run(batch);
                 emu.tick_peripherals();

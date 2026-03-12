@@ -1,5 +1,6 @@
 #pragma once
 #include "../bus.hpp"
+#include "ppi.hpp"
 #include <cstdio>
 
 namespace pt {
@@ -24,9 +25,11 @@ class ClockPower : public Device {
     uint32_t inten_ = 0;
     NVIC* nvic_ = nullptr;
     uint32_t irq_ = 0; // POWER_CLOCK_IRQn = 0
+    PPI* ppi_ = nullptr;
 
 public:
     void set_nvic(NVIC* nvic, uint32_t irq) { nvic_ = nvic; irq_ = irq; }
+    void set_ppi(PPI* p) { ppi_ = p; }
 
     uint32_t read(uint32_t addr, Width /*w*/) override {
         switch (addr) {
@@ -61,7 +64,11 @@ public:
         switch (addr) {
         // CLOCK tasks
         case 0x000: // TASKS_HFCLKSTART
-            if (val) { hfclk_running_ = true; ev_hfclkstarted_ = 1; update_irq(); }
+            if (val) {
+                hfclk_running_ = true; ev_hfclkstarted_ = 1;
+                if (ppi_) ppi_->on_event(0x40000100); // HFCLKSTARTED → PPI CH31
+                update_irq();
+            }
             break;
         case 0x004: // TASKS_HFCLKSTOP
             if (val) { hfclk_running_ = false; ev_hfclkstarted_ = 0; }

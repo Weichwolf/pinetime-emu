@@ -38,11 +38,13 @@ public:
     }
 
     uint64_t cycles = 0;
+    std::array<uint32_t, 48> irq_dispatch_count{}; // Count dispatches per exception
     bool halted = false;
     bool wfi = false;
     bool event_reg = false;    // WFE event register (set by SEV, interrupts)
     bool irq_pending = false;  // Set when any interrupt state changes
     bool breakpoint_hit = false;
+    uint64_t yield_at = UINT64_MAX; // CPU yields from run() when cycles >= yield_at
     uint32_t prev_pc_ = 0;
 
     // Exclusive monitor (LDREX/STREX)
