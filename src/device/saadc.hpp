@@ -42,9 +42,9 @@ class SAADC : public Device {
     NVIC* nvic_ = nullptr;
     uint32_t irq_ = 0;
 
-    // Simulated battery: ~4.0V through voltage divider = ~0.8V at ADC
-    // With 1/5 gain and 0.6V ref: raw = 0.8 * (1/5) / 0.6 * 4095 ≈ 1092
-    static constexpr int16_t BATTERY_ADC = 1092;
+    // Simulated battery: 4.0V → divider Vbat/2 = 2.0V at AIN7
+    // Gain 1/6, ref 0.6V → full-scale 3.6V → raw = 2.0/3.6 * 4095 ≈ 2275
+    static constexpr int16_t BATTERY_ADC = 2275;
 
 public:
     void set_bus(Bus* bus) { bus_ = bus; }
