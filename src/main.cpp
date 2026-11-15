@@ -256,6 +256,9 @@ struct EmulatorContext {
         rtc1.set_ppi(&ppi, 0x40011000);
         rtc2.set_nvic(&nvic, 36);
         rtc2.set_ppi(&ppi, 0x40024000);
+        rtc0.set_cycles(&cpu.cycles);
+        rtc1.set_cycles(&cpu.cycles);
+        rtc2.set_cycles(&cpu.cycles);
 
         // Wire SPIM/TWIM to bus (for DMA) and NVIC
         spim0.set_bus(&bus);
