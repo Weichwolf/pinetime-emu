@@ -256,6 +256,23 @@ void test_sys_exception_priority() {
     ASSERT_EQ(nvic.system_priority(4), 0u);
 }
 
+void test_systick_countflag_read_clears() {
+  NVIC nvic;
+
+  nvic.write(0x010, Width::Word, 0x5); // Enable SysTick
+  nvic.write(0x014, Width::Word, 10);  // Reload value
+  nvic.write(0x018, Width::Word, 0);   // Clear current value
+
+  for (uint64_t cy = 0; cy <= 12; cy++)
+    nvic.tick(cy);
+
+  uint32_t first = nvic.read(0x010, Width::Word);
+  uint32_t second = nvic.read(0x010, Width::Word);
+
+  ASSERT(first & (1u << 16));
+  ASSERT_EQ(second & (1u << 16), 0u);
+}
+
 int main() {
     RUN(test_initial_state);
     RUN(test_iser_icer);
@@ -284,5 +301,6 @@ int main() {
     RUN(test_aircr_prigroup);
     RUN(test_get_pending_priority);
     RUN(test_sys_exception_priority);
+    RUN(test_systick_countflag_read_clears);
     TEST_REPORT();
 }

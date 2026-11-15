@@ -286,6 +286,28 @@ void test_rtc_cc_all_channels() {
     }
 }
 
+void test_rtc_start_ignores_prior_cycles() {
+  RTC rtc;
+  uint64_t cycles = 1000000;
+
+  rtc.set_cycles(&cycles);
+  rtc.write(0x508, Width::Word, 0); // PRESCALER = 0
+
+  // The emulator has already executed one million CPU cycles.
+  // RTC has not started yet.
+  rtc.write(0x000, Width::Word, 1); // START
+
+  // No CPU cycles have elapsed since START.
+  rtc.tick(cycles);
+  ASSERT_EQ(rtc.read(0x504, Width::Word), 0u);
+
+  // Advance exactly three RTC ticks.
+  cycles += 1953u * 3u;
+  rtc.tick(cycles);
+
+  ASSERT_EQ(rtc.read(0x504, Width::Word), 3u);
+}
+
 int main() {
     RUN(test_timer_start_stop);
     RUN(test_timer_clear);
@@ -311,5 +333,6 @@ int main() {
     RUN(test_rtc_tick_irq);
     RUN(test_rtc_shorts_compare_clear);
     RUN(test_rtc_cc_all_channels);
+    RUN(test_rtc_start_ignores_prior_cycles);
     TEST_REPORT();
 }
