@@ -202,6 +202,7 @@ class RTC : public Device {
     uint32_t evten_ = 0;
 
     uint64_t last_tick_ = 0;
+    uint64_t* cpu_cy_ = nullptr;
     NVIC* nvic_ = nullptr;
     uint32_t irq_ = 0;
     PPI* ppi_ = nullptr;
@@ -209,6 +210,7 @@ class RTC : public Device {
 
 public:
     uint32_t irq_fire_count_ = 0;
+    void set_cycles(uint64_t* cy) { cpu_cy_ = cy; }
     void set_nvic(NVIC* nvic, uint32_t irq) { nvic_ = nvic; irq_ = irq; }
     void set_ppi(PPI* ppi, uint32_t base) { ppi_ = ppi; base_addr_ = base; }
 
@@ -241,8 +243,19 @@ public:
 
     void write(uint32_t addr, Width /*w*/, uint32_t val) override {
         switch (addr) {
-        case 0x000: if (val) running_ = true; return;
-        case 0x004: if (val) running_ = false; return;
+        case 0x000:
+            if (val && !running_) {
+                running_ = true;
+                if (cpu_cy_) last_tick_ = *cpu_cy_;
+            }
+            return;
+        case 0x004:
+            if (val && running_) {
+                // Account for elapsed running cycles before stopping.
+                if (cpu_cy_) tick(*cpu_cy_);
+                running_ = false;
+            }
+            return;
         case 0x008: if (val) counter_ = 0; return;
         case 0x024: return; // TASKS_TRIGOVRFLW
         }

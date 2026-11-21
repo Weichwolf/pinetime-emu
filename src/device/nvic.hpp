@@ -245,9 +245,13 @@ public:
     }
 
 private:
-    uint32_t read_systick(uint32_t off) const {
+    uint32_t read_systick(uint32_t off) {
         switch (off) {
-        case 0x00: return syst_csr_;
+        case 0x00: {
+            uint32_t value = syst_csr_;
+            syst_csr_ &= ~(1u << 16);
+            return value;
+        }
         case 0x04: return syst_rvr_;
         case 0x08: return syst_cvr_;
         case 0x0C: return 0x00FFFFFF; // CALIB: 24-bit timer, no TENMS

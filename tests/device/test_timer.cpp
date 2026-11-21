@@ -286,6 +286,58 @@ void test_rtc_cc_all_channels() {
     }
 }
 
+void test_rtc_start_ignores_prior_cycles() {
+  RTC rtc;
+  uint64_t cycles = 1000000;
+
+  rtc.set_cycles(&cycles);
+  rtc.write(0x508, Width::Word, 0); // PRESCALER = 0
+
+  // The emulator has already executed one million CPU cycles.
+  // RTC has not started yet.
+  rtc.write(0x000, Width::Word, 1); // START
+
+  // No CPU cycles have elapsed since START.
+  rtc.tick(cycles);
+  ASSERT_EQ(rtc.read(0x504, Width::Word), 0u);
+
+  // Advance exactly three RTC ticks.
+  cycles += 1953u * 3u;
+  rtc.tick(cycles);
+
+  ASSERT_EQ(rtc.read(0x504, Width::Word), 3u);
+}
+
+void test_rtc_stop_restart_preserves_running_ticks() {
+    constexpr uint64_t cycles_per_tick = 1953; // Prescaler = 0
+    uint64_t cycles = 0;
+    RTC rtc;
+    NVIC nvic;
+    rtc.set_cycles(&cycles);
+    rtc.set_nvic(&nvic, 17);
+    rtc.write(0x540, Width::Word, 2); // CC[0]
+    rtc.write(0x304, Width::Word, 1u << 16); // INTENSET COMPARE0
+
+    rtc.write(0x000, Width::Word, 1); // START
+    rtc.tick(cycles);
+    cycles += 2 * cycles_per_tick;
+    rtc.write(0x004, Width::Word, 1); // STOP before the next scheduler tick
+
+    ASSERT_EQ(rtc.read(0x504, Width::Word), 2u);
+    ASSERT_EQ(rtc.read(0x140, Width::Word), 1u);
+    ASSERT(nvic.is_pending(17));
+
+    cycles += 5 * cycles_per_tick;
+    rtc.tick(cycles);
+    rtc.write(0x000, Width::Word, 1); // START
+    rtc.tick(cycles);
+    ASSERT_EQ(rtc.read(0x504, Width::Word), 2u);
+
+    cycles += cycles_per_tick;
+    rtc.tick(cycles);
+    ASSERT_EQ(rtc.read(0x504, Width::Word), 3u);
+}
+
 int main() {
     RUN(test_timer_start_stop);
     RUN(test_timer_clear);
@@ -311,5 +363,7 @@ int main() {
     RUN(test_rtc_tick_irq);
     RUN(test_rtc_shorts_compare_clear);
     RUN(test_rtc_cc_all_channels);
+    RUN(test_rtc_start_ignores_prior_cycles);
+    RUN(test_rtc_stop_restart_preserves_running_ticks);
     TEST_REPORT();
 }
