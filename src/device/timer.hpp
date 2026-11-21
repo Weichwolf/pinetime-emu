@@ -249,7 +249,13 @@ public:
                 if (cpu_cy_) last_tick_ = *cpu_cy_;
             }
             return;
-        case 0x004: if (val) running_ = false; return;
+        case 0x004:
+            if (val && running_) {
+                // Account for elapsed running cycles before stopping.
+                if (cpu_cy_) tick(*cpu_cy_);
+                running_ = false;
+            }
+            return;
         case 0x008: if (val) counter_ = 0; return;
         case 0x024: return; // TASKS_TRIGOVRFLW
         }
